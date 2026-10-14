@@ -126,6 +126,10 @@ check("import_names", p["names"][0]["name"] == "A" and p["module"] == "game.exe"
 mod.import_names([{"name": "A", "address": "0x1"}], address_is_ida=True, ida_image_base="0x400000", prefix="x_")
 p = params_seen["import_names"]
 check("import_names ida flags", p["address_is_ida"] is True and p["prefix"] == "x_" and p["ida_image_base"] == "0x400000", p)
+mod.pe_functions()
+check("pe_functions() sends only paging", params_seen["pe_functions"] == {"offset": 0, "limit": 100}, params_seen["pe_functions"])
+mod.pe_functions(address="0x140001025", include_unwind=True)
+check("pe_functions address + unwind", params_seen["pe_functions"] == {"address": "0x140001025", "offset": 0, "limit": 100, "include_unwind": True}, params_seen["pe_functions"])
 mod.snapshot_region(address="0x9000", size=16, name="A")
 check("snapshot_region address", params_seen["snapshot_region"] == {"address": "0x9000", "size": 16, "name": "A"}, params_seen["snapshot_region"])
 mod.snapshot_region(module="game.exe", section=".data")
@@ -159,14 +163,14 @@ mod.find_string_refs(address="0x1000", wide=True, match="any", include_data=Fals
 check("find_string_refs: address/wide/any/no-data", params_seen["start_job"]["params"] == {"address": "0x1000", "wide": True, "match": "any", "include_data": False}, params_seen["start_job"])
 
 # ---- retry policy table for the new bridge methods
-for m, want in [("pe_info", True), ("pe_imports", True), ("pe_exports", True), ("pe_tls_callbacks", True), ("va_to_rva", True),
+for m, want in [("pe_info", True), ("pe_functions", True), ("pe_imports", True), ("pe_exports", True), ("pe_tls_callbacks", True), ("va_to_rva", True),
                 ("rva_to_va", True), ("rebase_address", True), ("export_names", True), ("export_structures", True), ("diff_snapshots", True),
                 ("snapshot_region", True), ("list_snapshots", True), ("delete_snapshot", True), ("import_names", False), ("start_job", False)]:
     check("is_idempotent(%s)==%s" % (m, want), mod.is_idempotent(m) == want)
 
 # ---- MCP registration / schemas
 tools = {tool.name: tool for tool in mod.mcp._tool_manager.list_tools()}
-need = ["pe_info", "pe_imports", "pe_exports", "pe_tls_callbacks", "va_to_rva", "rva_to_va", "rebase_address", "export_names", "export_structures",
+need = ["pe_info", "pe_functions", "pe_imports", "pe_exports", "pe_tls_callbacks", "va_to_rva", "rva_to_va", "rebase_address", "export_names", "export_structures",
         "import_names", "rtti_scan_module", "find_string_refs", "find_code_caves", "find_pointer_path", "snapshot_region", "list_snapshots",
         "delete_snapshot", "diff_snapshots"]
 check("all new tools registered with MCP", all(n in tools for n in need), [n for n in need if n not in tools])

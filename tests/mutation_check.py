@@ -50,6 +50,12 @@ MUTANTS = [
     ("string_match_start_ignored", ANALYSIS, "if anyMatch or s == 1 or data:byte(s - 1) == 0 then", "if true then", "caught"),
     ("import_ordinals_misread", ANALYSIS, "if (e.thunk & ordBit) ~= 0 then", "if false then", "caught"),
     ("section_flags_swapped", ANALYSIS, '((chars & 0x80000000) ~= 0 and "w" or "-") .. ((chars & 0x20000000) ~= 0 and "x" or "-")', '((chars & 0x20000000) ~= 0 and "w" or "-") .. ((chars & 0x80000000) ~= 0 and "x" or "-")', "caught"),
+    # --- UNIT-27 part A (.pdata)
+    ("pdata_end_treated_as_inclusive", ANALYSIS, "        elseif rva >= e then lo = mid + 1\n", "        elseif rva > e then lo = mid + 1\n", "caught"),
+    ("pdata_chained_fragments_not_followed", ANALYSIS, "while primaryInfo and primaryInfo.chain and hops < 8 do", "while false do", "caught"),
+    ("analyze_function_stops_at_first_ret", ANALYSIS, "if (b1 == 0xC3 or b1 == 0xC2) and not pd then", "if (b1 == 0xC3 or b1 == 0xC2) then", "caught"),
+    ("find_function_boundaries_ignores_pdata", ANALYSIS, "        if okPd and pd then\n            return {\n                success = true, found = true, query_address", "        if false and pd then\n            return {\n                success = true, found = true, query_address", "caught"),
+    ("exception_handler_not_read", ANALYSIS, "    elseif (flags & 3) ~= 0 then\n        local h = U26.u32(mod.base + tail)", "    elseif false then\n        local h = U26.u32(mod.base + tail)", "caught"),
     # Defensive only: a false x86 locator is harmless unless something points at it, so no result changes.
     ("x86_locator_sanity_check_removed", ANALYSIS, "ok = nb >= 1 and nb <= 64 and arr >= mod.base and arr < mod.base + mod.size", "ok = true", "survives"),
 ]

@@ -1,6 +1,8 @@
 """Offline checks of UNIT-26: PE parsing, address translation, RTTI, string refs, code caves, pointer paths,
 snapshots and IDA exchange, on synthetic x64/x86 PE images driven through a fake CE API.
 
+Also covers the .pdata function table (exact boundaries, unwind info, chained fragments).
+
 Usage: python tests/test_lua_analysis.py [path/to/ce_mcp_bridge.lua] [--real]
   --real  additionally validates the PE/RTTI parsing against real system DLLs loaded in this process
           (exports/imports are cross-checked with GetProcAddress, sections with VirtualQuery).
@@ -21,6 +23,11 @@ _, j = func_end(t, "function cmd_next_scan(params)")
 scan_block = t[t.index("local USER_MODE_MAX"):j]
 unit25 = t[t.index("-- >>> BEGIN UNIT-25 Operations"):t.index("-- >>> END UNIT-25 <<<")]
 unit26 = t[t.index("-- >>> BEGIN UNIT-26 Analysis"):t.index("-- >>> END UNIT-26 <<<")]
+unit27 = t[t.index("-- >>> BEGIN UNIT-27"):t.index("-- >>> END UNIT-27 <<<")]
+i, j = func_end(t, "function cmd_find_function_boundaries(params)")
+func_block_text = t[i:j]
+i, j = func_end(t, "function cmd_analyze_function(params)")
+func_block_text += t[i:j]
 i, j = func_end(t, "function resolveChain(base, offsets)")
 resolve_block = t[i:j]
 i, j = func_end(t, "function cmd_register_symbol(params)")
@@ -30,7 +37,7 @@ register_block = t[i:j]
 # --------------------------------------------------------------------------- synthetic PE builder
 def build_image(is64, base, other_base):
     P = 8 if is64 else 4
-    img = bytearray(0x4000)
+    img = bytearray(0x5000 if is64 else 0x4000)
 
     def w(off, b): img[off:off + len(b)] = b
     def u32(off, v): struct.pack_into('<I', img, off, v)
@@ -42,7 +49,7 @@ def build_image(is64, base, other_base):
     nt = 0x80
     w(nt, b'PE\0\0')
     optsize = 240 if is64 else 224
-    struct.pack_into('<HHIIIHH', img, nt + 4, 0x8664 if is64 else 0x14C, 3, 0x5F5E1000, 0, 0, optsize, 0x22)
+    struct.pack_into('<HHIIIHH', img, nt + 4, 0x8664 if is64 else 0x14C, 4 if is64 else 3, 0x5F5E1000, 0, 0, optsize, 0x22)
     opt = nt + 24
     struct.pack_into('<H', img, opt, 0x20B if is64 else 0x10B)
     u32(opt + 16, 0x1000); u32(opt + 20, 0x1000)
@@ -51,14 +58,17 @@ def build_image(is64, base, other_base):
     else:
         u32(opt + 24, 0x2000); u32(opt + 28, base)
     u32(opt + 32, 0x1000); u32(opt + 36, 0x200)
-    u32(opt + 56, 0x4000); u32(opt + 60, 0x1000)
+    u32(opt + 56, 0x5000 if is64 else 0x4000); u32(opt + 60, 0x1000)
     struct.pack_into('<HH', img, opt + 68, 3, 0x8160)
     u32(opt + (108 if is64 else 92), 16)
     dirs = opt + (112 if is64 else 96)
     def setdir(i, rva, size): struct.pack_into('<II', img, dirs + i * 8, rva, size)
     setdir(0, 0x2000, 0x110); setdir(1, 0x2200, 0x28); setdir(9, 0x2300, 0x28)
     sec = opt + optsize
-    for k, (name, rva, vs, chars) in enumerate([(b'.text', 0x1000, 0x1000, 0x60000020), (b'.rdata', 0x2000, 0x1000, 0x40000040), (b'.data', 0x3000, 0x1000, 0xC0000040)]):
+    sections = [(b'.text', 0x1000, 0x1000, 0x60000020), (b'.rdata', 0x2000, 0x1000, 0x40000040), (b'.data', 0x3000, 0x1000, 0xC0000040)]
+    if is64:
+        sections.append((b'.pdata', 0x4000, 0x1000, 0x40000040))
+    for k, (name, rva, vs, chars) in enumerate(sections):
         o = sec + k * 40
         w(o, name.ljust(8, b'\0'))
         struct.pack_into('<IIII', img, o + 8, vs, rva, vs, rva)
@@ -129,6 +139,19 @@ def build_image(is64, base, other_base):
     col(0x2500, 'Base', 0x2400); col(0x2530, 'Derived', 0x2440)
     w(0x2600, ptr(va(0x2500)) + ptr(va(0x1020)) + ptr(va(0x1030)) + ptr(0))
     w(0x2640, ptr(va(0x2530)) + ptr(va(0x1020)) + ptr(va(0x1040)) + ptr(va(0x1050)) + ptr(0))
+    if is64:
+        # a call inside the function 0x1040-0x1050 (after its first RET byte)
+        w(0x1042, b'\xE8' + struct.pack('<i', 0x1700 - (0x1042 + 5)))
+        # .pdata: RUNTIME_FUNCTION table (sorted) + UNWIND_INFO blocks
+        table = [(0x1000, 0x1020, 0x4120), (0x1020, 0x1030, 0x4120), (0x1030, 0x1040, 0x4120), (0x1040, 0x1050, 0x4130),
+                 (0x1050, 0x1060, 0x4120), (0x1100, 0x1200, 0x4120), (0x1800, 0x1830, 0x4150)]
+        for k, (b, e, u) in enumerate(table):
+            struct.pack_into('<III', img, 0x4000 + k * 12, b, e, u)
+        setdir(3, 0x4000, len(table) * 12)
+        img[0x4120:0x4124] = bytes([0x01, 0x00, 0x00, 0x00])                      # v1, no flags, empty prolog
+        img[0x4130:0x4134] = bytes([0x01 | (1 << 3), 6, 1, 0]); u32(0x4138, 0x1700)  # EHANDLER, 1 code (padded), handler RVA
+        img[0x4150:0x4154] = bytes([0x01 | (4 << 3), 0, 0, 0x25])                 # CHAININFO, frame register rbp, offset 2*16
+        struct.pack_into('<III', img, 0x4154, 0x1020, 0x1030, 0x4120)             # chained parent
     return bytes(img)
 
 
@@ -205,6 +228,7 @@ function readBytes(addr, size, asTable)
     local chunk = { string.byte(s, i, math.min(i + 4095, #s)) }
     for k = 1, #chunk do t[#t + 1] = chunk[k] end
   end
+  if not asTable then return table.unpack(t) end
   return t
 end
 function readPointer(addr)
@@ -218,6 +242,7 @@ function readInteger(addr)
   return (string.unpack("<I4", string.char(table.unpack(b))))
 end
 function disassemble(addr) return "insn@" .. string.format("%X", addr) end
+function getInstructionSize(addr) local b = readBytes(addr, 1, false); return b == 0xE8 and 5 or 1 end
 
 -- fake memscan / foundlist / timer
 SCANS = {}
@@ -303,7 +328,7 @@ local function join(t) return table.concat(t, ",") end
 
 TESTS_X64 = r'''
 MODULES = {
-  { Name = "game.exe",  Address = %(b64)d, Size = 0x4000, Is64Bit = true },
+  { Name = "game.exe",  Address = %(b64)d, Size = 0x5000, Is64Bit = true },
   { Name = "other.dll", Address = %(o64)d, Size = 0x10000, Is64Bit = true },
 }
 TARGET64 = true
@@ -313,14 +338,14 @@ local GB = %(b64)d
 local r = cmd_pe_info({})
 eq("pe_info ok", r.success and r.module == "game.exe" and r.arch == "x64" and r.is_64bit, true)
 eq("pe_info entry", r.entry_point_rva == 0x1000 and r.entry_point == string.format("0x%%X", GB + 0x1000), true)
-eq("pe_info 3 sections", #r.sections, 3)
-eq("pe_info section names", r.sections[1].name .. r.sections[2].name .. r.sections[3].name, ".text.rdata.data")
-eq("pe_info section flags", r.sections[1].flags .. r.sections[2].flags .. r.sections[3].flags, "r-xr--rw-")
+eq("pe_info 4 sections", #r.sections, 4)
+eq("pe_info section names", r.sections[1].name .. r.sections[2].name .. r.sections[3].name .. r.sections[4].name, ".text.rdata.data.pdata")
+eq("pe_info section flags", r.sections[1].flags .. r.sections[2].flags .. r.sections[3].flags .. r.sections[4].flags, "r-xr--rw-r--")
 eq("pe_info not relocated", r.relocated, false)
-eq("pe_info size_of_image", r.size_of_image, 0x4000)
+eq("pe_info size_of_image", r.size_of_image, 0x5000)
 local dnames = {}
 for _, d in ipairs(r.data_directories) do dnames[#dnames + 1] = d.name end
-eq("pe_info data directories", join(dnames), "export,import,tls")
+eq("pe_info data directories", join(dnames), "export,import,exception,tls")
 eq("pe_info by module name (case-insens, substring)", cmd_pe_info({ module = "GAME" }).module, "game.exe")
 eq("pe_info unknown module", cmd_pe_info({ module = "nope.dll" }).error_code, "NOT_FOUND")
 PROCESS_PID = 0
@@ -351,6 +376,32 @@ eq("tls present", r.has_tls and r.callback_count == 2, true)
 eq("tls callback addresses", r.callbacks[1].address .. "/" .. r.callbacks[2].address, string.format("0x%%X/0x%%X", GB + 0x1100, GB + 0x1200))
 eq("tls callback section", r.callbacks[1].section, ".text")
 eq("tls callback module", r.callbacks[1].module, "game.exe")
+
+-- ===================== .pdata functions =====================
+r = cmd_pe_functions({})
+eq("pe_functions total", r.total, 7)
+eq("pe_functions first entry", r.functions[1].begin_rva == 0x1000 and r.functions[1].size == 0x20, true)
+eq("pe_functions pagination", cmd_pe_functions({ offset = 5, limit = 10 }).returned, 2)
+eq("pe_functions include_unwind (handler of entry 4)",
+   cmd_pe_functions({ include_unwind = true, offset = 3, limit = 1 }).functions[1].exception_handler, string.format("0x%%X", GB + 0x1700))
+r = cmd_pe_functions({ address = GB + 0x1025 })
+eq("function at address", r.found and r.begin_rva == 0x1020 and r.end_rva == 0x1030 and r.size == 0x10, true)
+eq("function_end is the last byte", r.function_end, string.format("0x%%X", GB + 0x102F))
+eq("module picked from the address", r.module, "game.exe")
+eq("boundary: begin is inclusive", cmd_pe_functions({ address = GB + 0x1030 }).begin_rva, 0x1030)
+eq("boundary: end is exclusive", cmd_pe_functions({ address = GB + 0x1060 }).found, false)
+r = cmd_pe_functions({ address = GB + 0x1805 })
+eq("chained fragment resolves to its primary function", r.found and r.begin_rva == 0x1020 and r.fragment ~= nil and r.fragment.begin_rva == 0x1800, true)
+eq("fragment unwind info", r.fragment.unwind.frame_register == "rbp" and r.fragment.unwind.frame_offset == 32 and r.fragment.unwind.flags[1] == "CHAININFO", true)
+r = cmd_pe_functions({ address = GB + 0x1045 })
+eq("exception handler reported", r.exception_handler == string.format("0x%%X", GB + 0x1700) and r.unwind.flags[1] == "EHANDLER" and r.unwind.prolog_size == 6, true)
+r = cmd_pe_functions({ address = GB + 0x1500 })
+eq("uncovered address is not an error", r.success and r.found == false and r.available == true, true)
+r = cmd_find_function_boundaries({ address = GB + 0x1025 })
+eq("find_function_boundaries uses .pdata", r.method == "pdata" and r.exact == true and r.function_start == string.format("0x%%X", GB + 0x1020) and r.function_size == 0x10, true)
+r = cmd_analyze_function({ address = GB + 0x1045 })
+eq("analyze_function walks the whole exact range (past the first ret)", r.method == "pdata" and r.call_count == 1 and r.calls[1].target == string.format("0x%%X", GB + 0x1700), true)
+eq("analyze_function end", r.function_end, string.format("0x%%X", GB + 0x104F))
 
 -- ===================== address translation =====================
 r = cmd_va_to_rva({ address = GB + 0x2808 })
@@ -428,6 +479,8 @@ eq("string refs addresses (incl. one across a chunk border)", join(addrs),
    string.format("0x%%X,0x%%X,0x%%X,0x%%X", GB + 0x1100, GB + 0x11FC, GB + 0x1600, GB + 0x3500))
 eq("string refs decoy excluded", #r.references, 4)
 eq("string refs instruction text", r.references[1].instruction, "insn@" .. string.format("%%X", GB + 0x1100))
+eq("string refs say which function they are in", r.references[1].function_start == "game.exe+0x1100" and r.references[2].function_rva == 0x1100, true)
+eq("a reference outside .pdata has no function", r.references[3].function_start, nil)
 eq("string refs rva/section", r.references[4].section == ".data" and r.references[1].rva == 0x1100, true)
 r = runJob("find_string_refs", { text = "world" })
 eq("string match=start ignores mid-string hits", #r.string_addresses, 0)
@@ -573,6 +626,8 @@ eq("x86 pe_info", r.success and r.arch == "x86" and r.is_64bit == false and r.pr
 r = cmd_pe_imports({})
 eq("x86 imports", r.total == 3 and r.imports[1].name == "ExitProcess" and r.imports[3].ordinal == 0x10, true)
 eq("x86 imports resolved", r.imports[1].resolved_module, "other.dll")
+r = cmd_pe_functions({})
+eq("x86 has no .pdata", r.success and r.available == false, true)
 r = cmd_pe_exports({})
 eq("x86 exports", r.total == 3 and r.exports[3].forwarder == "other.dll.Target", true)
 r = cmd_pe_tls_callbacks({})
@@ -600,7 +655,7 @@ def make_program(images_and_body):
     return images_and_body
 
 
-common = STUBS + "\n" + prefix + "\n" + read_block + "\n" + scan_block + "\n" + unit25 + "\n" + unit26 + "\n" + resolve_block + "\n" + register_block + "\n"
+common = STUBS + "\n" + prefix + "\n" + read_block + "\n" + scan_block + "\n" + unit25 + "\n" + unit26 + "\n" + unit27 + "\n" + func_block_text + "\n" + resolve_block + "\n" + register_block + "\n"
 x64_prog = common + page_lines(X64_BASE, img64) + "\n" + HELPERS + TESTS_X64
 if os.environ.get("BRIDGE_TEST_DUMP"):
     open(os.environ["BRIDGE_TEST_DUMP"], "w", encoding="utf-8").write(x64_prog)
@@ -645,9 +700,22 @@ if has_flag("--real"):
         hmod = k32.LoadLibraryW(dllname)
         if not hmod:
             print("cannot load", dllname); return
-        hdr = ctypes.string_at(hmod, 0x400)
+        hdr = ctypes.string_at(hmod, 0x1000)
         nt = struct.unpack_from('<I', hdr, 0x3C)[0]
         soi = struct.unpack_from('<I', hdr, nt + 24 + 56)[0]
+        # independent section parse: sample addresses spread over the executable sections for the .pdata cross-check
+        nsec = struct.unpack_from('<H', hdr, nt + 6)[0]
+        optsz = struct.unpack_from('<H', hdr, nt + 20)[0]
+        samples = []
+        for k in range(nsec):
+            o = nt + 24 + optsz + k * 40
+            vs, va = struct.unpack_from('<II', hdr, o + 8)
+            chars = struct.unpack_from('<I', hdr, o + 36)[0]
+            if (chars & 0x20000000) and vs:
+                step = max(1, vs // 160)
+                samples += [hmod + va + i * step + 3 for i in range(160) if i * step < vs]
+        fn_lua = ("out.fn = {}\nfor _, a in ipairs({" + ",".join(str(a) for a in samples) +
+                  "}) do out.fn[#out.fn + 1] = cmd_pe_functions({ address = a }) end\n")
         lua = common + read_image(hmod, soi) + """
 MODULES = { { Name = %s, Address = %d, Size = %d, Is64Bit = true } }
 TARGET64 = true
@@ -657,7 +725,7 @@ out.info = cmd_pe_info({})
 out.exports = cmd_pe_exports({ limit = 10000 })
 out.imports = cmd_pe_imports({ limit = 10000 })
 out.tls = cmd_pe_tls_callbacks({})
-""" + ("""
+""" + fn_lua + ("""
 U26.CHUNK = 0x10000
 local rt = runJob("rtti_scan", {})
 out.rtti = rt
@@ -708,6 +776,30 @@ return json.encode(out)
                     if imism <= 3: print("  import mismatch", e["dll"], e["name"], hex(addr or 0), e["resolved"])
         print("  imports: total=%d checked=%d mismatches=%d dlls=%d" % (imps["total"], icheck, imism, len(imps["dlls"])))
         res = {"exports_ok": checked > 0 and mism == 0, "imports_ok": icheck > 0 and imism <= max(1, icheck // 50), "sections_ok": bad == 0}
+        # .pdata: the function entry we find for each sample must equal what Windows' own unwinder finds
+        ntdll = ctypes.WinDLL("ntdll")
+        lookup = ntdll.RtlLookupFunctionEntry
+        lookup.restype = ctypes.c_void_p
+        lookup.argtypes = [ctypes.c_ulonglong, ctypes.POINTER(ctypes.c_ulonglong), ctypes.c_void_p]
+        pd_checked = pd_covered = pd_bad = 0
+        for addr, r in zip(samples, data.get("fn", [])):
+            image_base = ctypes.c_ulonglong()
+            entry = lookup(addr, ctypes.byref(image_base), None)
+            pd_checked += 1
+            if bool(entry) != bool(r.get("found")):
+                pd_bad += 1
+                if pd_bad <= 3: print("  pdata coverage mismatch at %#x: windows=%s ours=%s" % (addr, bool(entry), r.get("found")))
+                continue
+            if entry:
+                pd_covered += 1
+                b, e, _ = struct.unpack("<III", ctypes.string_at(entry, 12))
+                frag = r.get("fragment")
+                got = (frag["begin_rva"], frag["end_rva"]) if frag else (r["begin_rva"], r["end_rva"])
+                if (b, e) != got:
+                    pd_bad += 1
+                    if pd_bad <= 3: print("  pdata range mismatch at %#x: windows=%s ours=%s" % (addr, (hex(b), hex(e)), tuple(hex(x) for x in got)))
+        print("  .pdata: %d sampled, %d covered, mismatches vs RtlLookupFunctionEntry: %d" % (pd_checked, pd_covered, pd_bad))
+        res["pdata_ok"] = pd_checked > 0 and pd_covered > 0 and pd_bad == 0
         if want_rtti and "rtti" in data:
             rt = data["rtti"]
             print("  rtti: success=%s classes=%s vtables=%s" % (rt.get("success"), rt.get("class_count"), rt.get("vtable_count")))

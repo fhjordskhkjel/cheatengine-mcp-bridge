@@ -3445,6 +3445,17 @@ The MCP tools `rtti_scan_module`, `find_string_refs`, `find_code_caves` and `fin
 
 ---
 
+## 35. Functions, Struct Recovery & Breakpoint Control (Unit 27)
+
+### Function boundaries from `.pdata` (x64)
+`pe_functions` with `address` returns the function containing it: `function_start`, `function_end` (last byte), `begin_rva`, `end_rva` (exclusive), `size`, `expression` (`module+0xRVA`), `exception_handler` and `unwind` (`prolog_size`, `frame_register`, `frame_offset`, `flags` = `EHANDLER`/`UHANDLER`/`CHAININFO`). A chained unwind entry is a split ("cold") fragment: the result describes the primary function and `fragment` holds the matching entry. `found:false` is not an error: leaf functions that never touch the stack have no entry. Without `address` it pages through the whole table (`total`, `offset`, `limit`, `include_unwind`). x86 modules answer `available:false`.
+
+`find_function_boundaries` and `analyze_function` use the table first (`method:"pdata"`, `exact:true`; `analyze_function` then walks the whole range, including code after the first `ret`) and fall back to the old prologue/ret heuristic (`method:"heuristic"`). `find_string_refs` adds `function_start`/`function_rva` to references inside a known function.
+
+<!-- UNIT-27 end -->
+
+---
+
 ## Best Practices
 
 1. **Always call `ping` first** to verify connectivity before performing operations.

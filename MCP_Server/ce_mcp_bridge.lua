@@ -1380,6 +1380,21 @@ function cmd_find_function_boundaries(params)
 
     local is64 = targetIs64Bit()
 
+    -- x64 modules: the exception table gives the exact start and end (see pdataFunctionBoundaries)
+    if type(pdataFunctionBoundaries) == "function" then
+        local okPd, pd = pcall(pdataFunctionBoundaries, addr)
+        if okPd and pd then
+            return {
+                success = true, found = true, query_address = toHex(addr),
+                function_start = toHex(pd.start), function_end = toHex(pd.finish - 1), function_size = pd.finish - pd.start,
+                method = "pdata", exact = true, fragment = pd.fragment or nil,
+                exception_handler = pd.handler_rva and toHex(pd.module.base + pd.handler_rva) or nil,
+                module = pd.module.name, expression = pd.module.name .. "+" .. string.format("0x%X", pd.start - pd.module.base),
+                arch = "x64"
+            }
+        end
+    end
+
     local funcStart, prologueType = findFunctionPrologue(addr, maxSearch)
 
     -- Search forwards for return instruction
@@ -1404,6 +1419,7 @@ function cmd_find_function_boundaries(params)
         function_end = funcEnd and toHex(funcEnd) or nil,
         function_size = (funcStart and funcEnd) and (funcEnd - funcStart + 1) or nil,
         prologue_type = prologueType,
+        method = "heuristic",
         arch = is64 and "x64" or "x86",
         note = not found and "No standard function prologue found within search range" or nil
     }
@@ -1417,7 +1433,17 @@ function cmd_analyze_function(params)
     
     local is64 = targetIs64Bit()
 
-    local funcStart, prologueType = findFunctionPrologue(addr, 4096)
+    local pd
+    if type(pdataFunctionBoundaries) == "function" then
+        local okPd, res = pcall(pdataFunctionBoundaries, addr)
+        if okPd then pd = res end
+    end
+    local funcStart, prologueType
+    if pd then
+        funcStart, prologueType = pd.start, "pdata"
+    else
+        funcStart, prologueType = findFunctionPrologue(addr, 4096)
+    end
 
     if not funcStart then 
         return { 
@@ -1433,12 +1459,13 @@ function cmd_analyze_function(params)
     local funcEnd = nil
     local currentAddr = funcStart
     
-    while currentAddr < funcStart + 0x2000 do
+    local limitAddr = pd and pd.finish or (funcStart + 0x2000)
+    while currentAddr < limitAddr do
         local instSize = getInstructionSize(currentAddr)
         if not instSize or instSize == 0 then break end
         
         local b1 = readBytes(currentAddr, 1, false)
-        if b1 == 0xC3 or b1 == 0xC2 then
+        if (b1 == 0xC3 or b1 == 0xC2) and not pd then
             funcEnd = currentAddr
             break
         end
@@ -1473,11 +1500,15 @@ function cmd_analyze_function(params)
         currentAddr = currentAddr + instSize
     end
     
+    if pd then funcEnd = pd.finish - 1 end
+
     return {
         success = true,
         function_start = toHex(funcStart),
         function_end = funcEnd and toHex(funcEnd) or nil,
         prologue_type = prologueType,
+        method = pd and "pdata" or "heuristic",
+        exact = pd and true or nil,
         arch = is64 and "x64" or "x86",
         call_count = #calls,
         calls = calls
@@ -7575,6 +7606,11 @@ JOB_STARTERS.find_string_refs = function(job, p)
             local item = { address = U26.hex(h.addr), kind = h.kind, target = U26.hex(h.target), rva = rva, expression = mod.name .. "+" .. U26.hex(rva) }
             local sec = U26.sectionFor(pe, rva)
             if sec then item.section = sec.name end
+            local fn = U26.functionAt(mod, pe, rva)
+            if fn then
+                item.function_start = mod.name .. "+" .. U26.hex(fn.primary.begin_rva)
+                item.function_rva = fn.primary.begin_rva
+            end
             if h.kind ~= "abs_data" then item.instruction = disassemble(h.addr) or "???" end
             items[i] = item
         end
@@ -8000,6 +8036,185 @@ end
 
 -- >>> END UNIT-26 <<<
 
+-- >>> BEGIN UNIT-27 Functions (.pdata), struct recovery <<<
+
+-- ---------------------------------------------------------------------------
+-- x64 function boundaries from the exception table (.pdata): exact start/end for every function that has
+-- unwind data. (Leaf functions that never touch the stack have no entry; callers fall back to heuristics.)
+-- ---------------------------------------------------------------------------
+U26.pdataCache = {}
+
+-- Returns { data = <raw RUNTIME_FUNCTION table>, count = n } or nil, reason
+function U26.pdata(mod, pe)
+    if pe.machine ~= 0x8664 then return nil, "no .pdata function table on this architecture (x64 only)" end
+    local dir = pe.dirs[3]
+    if not dir or dir.rva == 0 or dir.size < 12 then return nil, "module has no exception directory" end
+    local key = string.format("%X:%X:%X", mod.base, pe.size_of_image, pe.timestamp)
+    local cached = U26.pdataCache[key]
+    if cached then return cached end
+    local size = dir.size - dir.size % 12
+    if size > 32 * 1024 * 1024 then return nil, "exception directory is implausibly large" end
+    local data, bad = U26.readRegion(mod.base + dir.rva, size)
+    if #bad > 0 then return nil, "exception directory is partially unreadable" end
+    local n = 0
+    for _ in pairs(U26.pdataCache) do n = n + 1 end
+    if n >= 4 then U26.pdataCache = {} end
+    local tbl = { data = data, count = size // 12 }
+    U26.pdataCache[key] = tbl
+    return tbl
+end
+
+function U26.pdataEntry(tbl, index)
+    return string.unpack("<I4I4I4", tbl.data, index * 12 + 1)
+end
+
+-- Binary search (the table is sorted by BeginAddress). Returns begin, end, unwind (RVAs; end is exclusive) or nil.
+function U26.pdataLookup(tbl, rva)
+    local lo, hi = 0, tbl.count - 1
+    while lo <= hi do
+        local mid = (lo + hi) // 2
+        local b, e, u = U26.pdataEntry(tbl, mid)
+        if rva < b then hi = mid - 1
+        elseif rva >= e then lo = mid + 1
+        else return b, e, u end
+    end
+    return nil
+end
+
+U26.UNWIND_REGS = { [0] = "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" }
+
+-- UNWIND_INFO: flags (exception handler / termination handler / chained), prolog size, frame register, handler RVA
+-- or the chained parent RUNTIME_FUNCTION.
+function U26.unwindInfo(mod, unwindRva)
+    local hdr = U26.rd(mod.base + unwindRva, 4)
+    if not hdr then return nil end
+    local b0, prolog, ncodes, frame = string.unpack("<BBBB", hdr)
+    local flags = b0 >> 3
+    local info = { version = b0 & 7, prolog_size = prolog, code_count = ncodes }
+    if (frame & 0xF) ~= 0 then
+        info.frame_register = U26.UNWIND_REGS[frame & 0xF]
+        info.frame_offset = (frame >> 4) * 16
+    end
+    local names = {}
+    if (flags & 1) ~= 0 then names[#names + 1] = "EHANDLER" end
+    if (flags & 2) ~= 0 then names[#names + 1] = "UHANDLER" end
+    if (flags & 4) ~= 0 then names[#names + 1] = "CHAININFO" end
+    info.flags = names
+    local tail = unwindRva + 4 + ((ncodes + 1) & ~1) * 2         -- unwind codes are padded to an even count
+    if (flags & 4) ~= 0 then
+        local raw = U26.rd(mod.base + tail, 12)
+        if raw then
+            local b, e, u = string.unpack("<I4I4I4", raw)
+            info.chain = { begin_rva = b, end_rva = e, unwind_rva = u }
+        end
+    elseif (flags & 3) ~= 0 then
+        local h = U26.u32(mod.base + tail)
+        if h then info.handler_rva = h end
+    end
+    return info
+end
+
+-- The function covering `rva`. Chained entries (cold/split fragments) are resolved to their primary function.
+-- Returns { entry, unwind, primary, primary_unwind, fragment } or nil, reason
+function U26.functionAt(mod, pe, rva)
+    local tbl, why = U26.pdata(mod, pe)
+    if not tbl then return nil, why end
+    local b, e, u = U26.pdataLookup(tbl, rva)
+    if not b then return nil, "address is not covered by .pdata (leaf function, padding or data)" end
+    local entry = { begin_rva = b, end_rva = e, unwind_rva = u }
+    local info = U26.unwindInfo(mod, u)
+    local primary, primaryInfo, hops = entry, info, 0
+    while primaryInfo and primaryInfo.chain and hops < 8 do
+        primary = { begin_rva = primaryInfo.chain.begin_rva, end_rva = primaryInfo.chain.end_rva, unwind_rva = primaryInfo.chain.unwind_rva }
+        primaryInfo = U26.unwindInfo(mod, primary.unwind_rva)
+        hops = hops + 1
+    end
+    return { entry = entry, unwind = info, primary = primary, primary_unwind = primaryInfo, fragment = (primary.begin_rva ~= entry.begin_rva) }
+end
+
+function U26.describeFunction(mod, fn, withUnwind)
+    local p = fn.primary
+    local out = {
+        function_start = U26.hex(mod.base + p.begin_rva), function_end = U26.hex(mod.base + p.end_rva - 1),
+        begin_rva = p.begin_rva, end_rva = p.end_rva, size = p.end_rva - p.begin_rva,
+        expression = mod.name .. "+" .. U26.hex(p.begin_rva),
+    }
+    if fn.fragment then
+        out.fragment = { begin_rva = fn.entry.begin_rva, end_rva = fn.entry.end_rva, address = U26.hex(mod.base + fn.entry.begin_rva) }
+    end
+    local info = fn.primary_unwind
+    if withUnwind and info then
+        out.unwind = info
+        if fn.fragment and fn.unwind then out.fragment.unwind = fn.unwind end
+    end
+    if info and info.handler_rva then
+        out.exception_handler = U26.hex(mod.base + info.handler_rva)
+    end
+    return out
+end
+
+-- Used by find_function_boundaries / analyze_function (defined earlier in the file, hence a global).
+-- Returns { start, finish (exclusive), fragment, module } or nil when .pdata cannot answer.
+function pdataFunctionBoundaries(addr)
+    local mod = U26.moduleFor(U26.listModules(), addr)
+    if not mod then return nil end
+    local pe = U26.parsePE(mod.base)
+    if not pe then return nil end
+    local fn = U26.functionAt(mod, pe, addr - mod.base)
+    if not fn then return nil end
+    return { start = mod.base + fn.primary.begin_rva, finish = mod.base + fn.primary.end_rva,
+             fragment = fn.fragment, module = mod, handler_rva = fn.primary_unwind and fn.primary_unwind.handler_rva }
+end
+
+-- pe_functions: with `address` -> the function that contains it; otherwise a page of the whole function table.
+function cmd_pe_functions(params)
+    local perr = requireProcess()
+    if perr then return perr end
+    local a
+    if params.address ~= nil and params.address ~= "" then
+        a = U26.addr(params.address)
+        if not a then return U26.err("Invalid address", "INVALID_ADDRESS") end
+    end
+    local spec = params.module
+    if (spec == nil or spec == "") and a then spec = a end
+    local mod, pe, _, err = U26.peFor({ module = spec })
+    if not mod then return err end
+    local tbl, why = U26.pdata(mod, pe)
+    if not tbl then
+        return { success = true, module = mod.name, available = false, reason = why, total = 0, functions = {} }
+    end
+
+    if a then
+        local fn, reason = U26.functionAt(mod, pe, a - mod.base)
+        if not fn then
+            return { success = true, module = mod.name, available = true, found = false, address = U26.hex(a), reason = reason }
+        end
+        local out = U26.describeFunction(mod, fn, true)
+        out.success, out.module, out.available, out.found, out.address = true, mod.name, true, true, U26.hex(a)
+        return out
+    end
+
+    local limit = clampInt(params.limit or 100, 1, 1000)
+    local offset = clampInt(params.offset or 0, 0, math.max(0, tbl.count - 1))
+    local list = {}
+    for i = offset, math.min(tbl.count, offset + limit) - 1 do
+        local b, e, u = U26.pdataEntry(tbl, i)
+        local item = { begin_rva = b, end_rva = e, size = e - b, address = U26.hex(mod.base + b), expression = mod.name .. "+" .. U26.hex(b) }
+        if params.include_unwind then
+            local info = U26.unwindInfo(mod, u)
+            if info then
+                item.prolog_size, item.flags, item.frame_register = info.prolog_size, info.flags, info.frame_register
+                if info.handler_rva then item.exception_handler = U26.hex(mod.base + info.handler_rva) end
+                if info.chain then item.chained_to = mod.name .. "+" .. U26.hex(info.chain.begin_rva) end
+            end
+        end
+        list[#list + 1] = item
+    end
+    return { success = true, module = mod.name, available = true, total = tbl.count, offset = offset, limit = limit, returned = #list, functions = list }
+end
+
+-- >>> END UNIT-27 <<<
+
 local commandHandlers = {
     -- Process & Modules
     get_process_info = cmd_get_process_info,
@@ -8261,6 +8476,10 @@ local commandHandlers = {
     delete_snapshot     = cmd_delete_snapshot,
     diff_snapshots      = cmd_diff_snapshots,
     -- >>> END UNIT-26 <<<
+
+    -- >>> BEGIN UNIT-27 <<<
+    pe_functions        = cmd_pe_functions,
+    -- >>> END UNIT-27 <<<
 }
 serverState.dispatch = commandHandlers   -- used by cmd_batch / cmd_bridge_status
 

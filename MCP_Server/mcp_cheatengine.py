@@ -876,12 +876,21 @@ def get_instruction_info(address: str) -> str:
 
 @mcp.tool()
 def find_function_boundaries(address: str, max_search: int = 4096) -> str:
-    """Attempt to find the start and end of a function containing the address."""
+    """Find the start and end of the function containing the address.
+
+    x64 modules: exact boundaries from the exception table (.pdata), reported with method="pdata", exact=true
+    (also the exception handler address, and `fragment` when the address is in a split/cold part of a function).
+    Anything else (x86, leaf functions without unwind data, JIT code): prologue/ret heuristic, method="heuristic".
+    """
     return format_result(ce_client.send_command("find_function_boundaries", {"address": address, "max_search": max_search}))
 
 @mcp.tool()
 def analyze_function(address: str) -> str:
-    """Analyze a function to find all CALL instructions output (calls made by this function)."""
+    """Analyze a function to find all CALL instructions (calls made by this function).
+
+    When .pdata knows the function (x64) the whole exact range is walked, including code after the first `ret`;
+    otherwise it stops at the first `ret` found by the heuristic. `method` says which was used.
+    """
     return format_result(ce_client.send_command("analyze_function", {"address": address}))
 
 @mcp.tool()
@@ -2943,6 +2952,25 @@ def diff_snapshots(snapshots: list[str], pattern: str = "", unit: int = 4, offse
         merge_gap=merge_gap or None, limit=limit)))
 
 # >>> END UNIT-26 <<<
+
+# >>> BEGIN UNIT-27 Functions (.pdata), struct recovery, breakpoint control <<<
+
+@mcp.tool()
+def pe_functions(module: str = "", address: str = "", offset: int = 0, limit: int = 100, include_unwind: bool = False) -> str:
+    """x64 function table (.pdata): every function with unwind data, or the exact function containing `address`.
+
+    With `address`: begin/end/size, `expression` ("module+0xRVA"), the exception handler address and the unwind info
+    (prolog size, frame register, flags EHANDLER/UHANDLER/CHAININFO). Split ("cold") fragments are resolved to their
+    primary function and described in `fragment`. found=false means the address is not covered: leaf functions that
+    never touch the stack have no entry, so use find_function_boundaries for the heuristic fallback.
+    Without `address`: a page of the table (`total`, `offset`, `limit`); include_unwind adds prolog/handler info per entry.
+    The module defaults to the one containing `address`, else the main module. x86 modules have no function table
+    (available=false).
+    """
+    return format_result(ce_client.send_command("pe_functions", _params(
+        module=module, address=address, offset=offset, limit=limit, include_unwind=include_unwind or None)))
+
+# >>> END UNIT-27 <<<
 
 if __name__ == "__main__":
     try:
