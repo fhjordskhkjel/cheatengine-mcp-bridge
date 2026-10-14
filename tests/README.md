@@ -28,6 +28,7 @@ python tests/test_lua_jobs.py        # a single suite (exit code 0 = all passed)
 | `test_lua_load.py` | The WHOLE bridge file executed in a fake CE (not extracted pieces): executing it twice must stop the first instance, and the real pipe worker/dispatcher answers every registered method with a proper reply (never a bare `true`; process-less calls say `NO_PROCESS`). Catches what piecewise tests cannot: helpers shadowing each other, load-time errors, reload behaviour |
 | `test_client_retry.py` | The Python client against a fake bridge on a real named pipe: no double execution of state-changing commands, reconnect backoff, timeouts that must not hang, bad UTF-8, RPC errors |
 | `test_client_jobs.py` | UNIT-25 MCP tools: parameter forwarding, `wait_for_job`, `batch_commands` retry policy |
+| `test_policy.py` | Capability profiles and tool groups: every tool and Lua dispatcher entry is classified, profile tiers nest, allow/deny, nothing smuggled through `batch` or `start_job`, and the real server module in subprocesses with different `CE_MCP_*` environments (only denied calls are sent, so a live bridge is never reached) |
 | `test_client_analysis.py` | UNIT-26 MCP tools: parameter cleaning, job wrappers (`wait_seconds` / `timed_out`), tool registration and schemas |
 
 `test_lua_analysis.py --real` goes further than the synthetic images: it parses `user32.dll` and `msvcp140.dll` as

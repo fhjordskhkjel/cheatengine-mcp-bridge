@@ -32,6 +32,7 @@ SUITES = [
     ("client retry",   "test_client_retry.py",   True),
     ("client jobs",    "test_client_jobs.py",    True),
     ("client analysis", "test_client_analysis.py", True),
+    ("policy",         "test_policy.py",         True),
 ]
 
 

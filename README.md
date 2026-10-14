@@ -341,6 +341,26 @@ Check these in order:
 | `CE_MCP_TIMEOUT` | `30` | Timeout (seconds) for each MCP tool call. Keep it below your MCP host's own tool timeout. |
 | `CE_MCP_CONNECT_WAIT` | `2` | Seconds to keep retrying when the pipe is busy or being re-created after a disconnect. |
 | `CE_MCP_ALLOW_SHELL` | *unset* | Set to `1` to enable `run_command` / `shell_execute` tools. **Arbitrary code execution risk** — leave unset by default. |
+| `CE_MCP_PROFILE` | `full` | What the AI client may **do**: `readonly` (observe), `analysis` (+ breakpoints, symbols, attach), `patch` (+ write memory), `full` (+ Lua, AutoAssembler, injection, shell, files, input). See below. |
+| `CE_MCP_TOOLSET` | *all* | Which tools are **listed** (shrinks the tool schema the model reads): groups and presets, e.g. `reverse` or `core,memory,analysis`. |
+| `CE_MCP_ALLOW` / `CE_MCP_DENY` | *unset* | Comma separated tool names: lift one tool above the profile / remove one below it (deny wins). |
+
+### Safety profiles and tool groups
+
+`CE_MCP_ALLOW_SHELL` only ever covered two tools. `evaluate_lua`, `auto_assemble` (scripts can contain `{$lua}`), `execute_code*`, `inject_dll`, `load_table`, `delete_file`, input automation and kernel writes reach the same power, so a prompt-injected client could always have used one of them. `CE_MCP_PROFILE` closes that: every call passes one gate in the MCP server (including the methods hidden inside `batch_commands` and `start_job`), and tools above the profile are not even listed. An unknown profile value fails closed (`readonly`). Set it in the MCP server's environment, e.g. in the client's MCP config:
+
+```json
+"cheatengine": { "command": "python", "args": ["C:\\path\\to\\mcp_cheatengine.py"], "env": { "CE_MCP_PROFILE": "analysis", "CE_MCP_TOOLSET": "reverse" } }
+```
+
+| Profile | Adds | Typical use |
+|---------|------|-------------|
+| `readonly` | reading memory, process/module info, scans, disassembly, PE/RTTI/xref analysis, snapshots | reverse engineering with an AI you do not fully trust |
+| `analysis` | breakpoints, DBVM watches, symbols, structures, attaching, host introspection | live debugging without changing the target |
+| `patch` | write memory/registers/protection, allocations | applying a patch you have reviewed |
+| `full` | Lua, AutoAssembler, code execution, injection, shell, files, clipboard, input automation, kernel writes | the previous behaviour (default) |
+
+Tool groups: `core` (always), `memory`, `scan`, `analysis`, `symbols`, `structures`, `table`, `debug`, `asm`, `exec`, `system`, `gui`, `kernel`; presets `minimal` (core, memory, scan), `reverse` (+ analysis, symbols, structures, debug) and `all`. A toolset only changes what is listed: with all 207 tools the schema is about 100 KB of text, `reverse` about 68 KB and `minimal` about 27 KB. The `policy_info` tool tells a client what is active and why a tool is missing.
 
 ---
 

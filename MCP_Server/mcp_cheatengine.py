@@ -128,6 +128,13 @@ sys.stdout = _mcp_stdout
 def debug_log(msg):
     print(f"[MCP CE] {msg}", file=sys.stderr, flush=True)
 
+# Capability profile / tool groups (CE_MCP_PROFILE, CE_MCP_ALLOW, CE_MCP_DENY, CE_MCP_TOOLSET); see tool_policy.py
+_here = os.path.dirname(os.path.abspath(__file__))
+if _here not in sys.path:                     # a sibling module must import however this file is launched (script, importlib, tests)
+    sys.path.insert(0, _here)
+import tool_policy
+POLICY = tool_policy.policy_from_env(os.environ)
+
 # Helper to format results as proper JSON strings for MCP tools
 def format_result(result):
     """Format CE Bridge result as a proper JSON string for AI consumption."""
@@ -347,6 +354,9 @@ class CEBridgeClient:
         state are re-sent only if the request provably never left this process
         (connect/write failure); otherwise the error says the outcome is unknown.
         """
+        denied = POLICY.check(method, params)
+        if denied:
+            return denied
         max_attempts = 2
         retry_after_send = is_idempotent(method) if idempotent is None else idempotent
         last_error = None
@@ -3077,6 +3087,53 @@ def get_halted_state(stack_depth: int = 16, extend_ms: int = 0) -> str:
     return format_result(ce_client.send_command("get_halted_state", _params(stack_depth=stack_depth, extend_ms=extend_ms or None)))
 
 # >>> END UNIT-27 <<<
+
+# >>> BEGIN UNIT-29 Capability profiles and tool groups <<<
+
+ALL_TOOLS = sorted(t.name for t in mcp._tool_manager.list_tools()) + ["policy_info"]
+
+
+@mcp.tool()
+def policy_info(details: bool = False) -> str:
+    """What this server is allowed to do and which tools it lists (CE_MCP_PROFILE / CE_MCP_TOOLSET / CE_MCP_ALLOW / CE_MCP_DENY).
+
+    Use it when a tool you expect is missing or a call comes back PERMISSION_DENIED. The profile is a security setting of
+    the MCP server's environment, not something a client can change: readonly < analysis < patch < full.
+    With details=true the names of the hidden tools are listed per group.
+    """
+    hidden = {"profile": [], "toolset": [], "denied": []}
+    listed = {}
+    for name in ALL_TOOLS:
+        why = POLICY.hidden_reason(name)
+        group = POLICY.group_of(name)
+        if why:
+            hidden[{"profile": "profile", "toolset": "toolset", "denied": "denied"}[why]].append(name)
+        else:
+            listed[group] = listed.get(group, 0) + 1
+    out = {
+        "success": True, "profile": POLICY.profile, "tier_ceiling": tool_policy.TIER_NAMES[POLICY.max_tier],
+        "toolset": sorted(POLICY.groups) if POLICY.groups is not None else "all",
+        "allow": sorted(POLICY.allow), "deny": sorted(POLICY.deny),
+        "shell_tools_enabled": os.environ.get("CE_MCP_ALLOW_SHELL") == "1",
+        "tools_listed": sum(listed.values()), "tools_hidden": {k: len(v) for k, v in hidden.items()},
+        "listed_per_group": dict(sorted(listed.items())),
+        "profiles": {"readonly": "observe only", "analysis": "+ breakpoints, symbols, structures, attach, host introspection",
+                     "patch": "+ write memory / registers / protection / allocations", "full": "+ code execution, injection, shell, files, input automation"},
+        "groups": list(tool_policy.GROUPS), "presets": {k: list(v) for k, v in tool_policy.PRESETS.items()},
+    }
+    if POLICY.warnings:
+        out["warnings"] = POLICY.warnings
+    if details:
+        out["hidden_tools"] = {k: v for k, v in hidden.items() if v}
+    return format_result(out)
+
+
+_unlisted = POLICY.apply(mcp)
+if POLICY.profile != "full" or POLICY.groups is not None or POLICY.allow or POLICY.deny:
+    debug_log("policy: profile=%s toolset=%s -> %d tools listed, %d hidden"
+              % (POLICY.profile, ",".join(sorted(POLICY.groups)) if POLICY.groups else "all", len(ALL_TOOLS) - len(_unlisted), len(_unlisted)))
+
+# >>> END UNIT-29 <<<
 
 if __name__ == "__main__":
     try:

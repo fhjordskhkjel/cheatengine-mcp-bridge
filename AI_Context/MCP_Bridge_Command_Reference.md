@@ -3205,6 +3205,9 @@ The MCP bridge Python server (`mcp_cheatengine.py`) reads the following environm
 | `CE_MCP_TIMEOUT` | float (seconds) | 30 | Timeout in seconds for each bridge command round-trip. Set `<=0` to disable timeout enforcement. |
 | `CE_MCP_CONNECT_WAIT` | float (seconds) | 2 | How long `connect()` keeps retrying when the pipe is busy or being re-created. A pipe that has never existed (CE not running) fails after ~0.25s. |
 | `CE_MCP_ALLOW_SHELL` | int (0 or 1) | 0 | Set to `1` to enable shell execution tools (`run_command`, `shell_execute`). **Disabled by default for security.** |
+| `CE_MCP_PROFILE` | string | `full` | `readonly` \| `analysis` \| `patch` \| `full`: the highest tier of tool the client may use (section 37). Unknown value = `readonly`. |
+| `CE_MCP_TOOLSET` | string | all | Comma separated tool groups / presets to list (section 37). Not a permission. |
+| `CE_MCP_ALLOW`, `CE_MCP_DENY` | string | unset | Comma separated tool names to lift above / remove below the profile. Deny wins. |
 
 **Setting environment variables:**
 
@@ -3511,6 +3514,27 @@ Verified in a live Cheat Engine (`tests/live_smoke.py`): what a `debug_setBreakp
 **Limits.** Static references only: a pointer held in the heap or on the stack is not found (use `find_pointer_path`). Indirect jumps through registers and computed addresses are invisible to any static scan. x86 has no rip-relative operands or `.pdata`; there `rip`/`rva` are ignored and `abs_code` is the main data-reference kind.
 
 Also in this unit: `find_string_refs` no longer misses `lea r12,[rip+x]`. Its hand-written pattern class contained a literal `%` that silently dropped modrm byte 0x25 (reg 4 = `r12`); all pattern classes now come from `U26.byteClass`.
+
+---
+
+## 37. Capability Profiles and Tool Groups (Unit 29)
+
+Implemented in `MCP_Server/tool_policy.py`, enforced in `CEBridgeClient.send_command` (the one place every tool passes) and applied to the tool list at startup. The Lua bridge is unchanged: it trusts whoever reaches the pipe, so the policy protects against an AI client, not against another local program.
+
+**Tiers.** Every MCP tool and every bridge wire method has a group and a tier in `CATALOG`. `readonly` allows tier *read*, `analysis` adds *analysis*, `patch` adds *patch*, `full` adds *full*. A name with no entry counts as *full*, so a new tool is unusable below `full` until it is classified (`tests/test_policy.py` fails until then).
+
+| Tier | Examples |
+|------|----------|
+| read | `read_memory`, `read_struct`, `scan_all`, `aob_scan`, `disassemble`, `pe_*`, `find_xrefs`, `recover_struct`, `snapshot_region`, `get_job`, `ping` |
+| analysis | `set_breakpoint`, `set_data_breakpoint`, `debug_continue`, `pause_process`, DBVM watches, `register_symbol`, `create_structure`, `open_process`, host file/window introspection, read-only kernel queries |
+| patch | `write_memory`, `write_integer`, `copy_memory`, `allocate_memory`, `set_memory_protection`, `debug_set_context`, `set_memory_record_value` |
+| full | `evaluate_lua`, `auto_assemble`, `compile_*`, `execute_code*`, `inject_*`, `create_thread`, `create_process`, `run_command`, `shell_execute`, `delete_file`, `load_table`/`save_table`, clipboard, mouse/keyboard/window messages, modal dialogs, kernel writes and mappings |
+
+**What is checked.** The method itself, every request inside `batch` (a nested batch is refused) and the `kind` of `start_job` (all current kinds are read-only scans). A refusal is an ordinary reply, produced before any connection to CE is made: `{success:false, error_code:"PERMISSION_DENIED", error, profile, hint}`. `CE_MCP_DENY` also matches the tool names behind wire methods (`batch_commands`, `find_xrefs`, `rtti_scan_module`).
+
+**Groups** (`CE_MCP_TOOLSET`): `core` (always listed), `memory`, `scan`, `analysis`, `symbols`, `structures`, `table`, `debug`, `asm`, `exec`, `system`, `gui`, `kernel`. Presets: `all`, `minimal` (core, memory, scan), `reverse` (core, memory, scan, analysis, symbols, structures, debug). Unknown entries are ignored with a warning on stderr. A toolset never grants anything the profile denies, and hiding a tool is not a permission: a hidden tool that the profile allows can still be reached through `batch_commands`.
+
+`policy_info(details=false)` reports the active profile, toolset, allow/deny lists, how many tools are listed per group and how many are hidden and why; `details=true` lists the hidden names.
 
 ---
 

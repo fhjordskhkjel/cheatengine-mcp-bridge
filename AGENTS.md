@@ -53,6 +53,10 @@ Thin `FastMCP` wrapper. Every `@mcp.tool()` is a one-liner that calls `ce_client
 - The MCP SDK's `stdio_server` wraps stdio with `TextIOWrapper` without `newline='\n'`, so on Windows it emits `\r\n` and the transport rejects with "invalid trailing data." The file monkey-patches `mcp.server.stdio.stdio_server` **and** `mcp.server.fastmcp.server.stdio_server` (FastMCP captures a reference at import time, so patching only the first module is a silent no-op).
 - `sys.stdout` is redirected to `sys.stderr` around third-party imports so stray prints can't corrupt the JSON-RPC stream. Anything diagnostic must go through `debug_log()` (stderr only). A single stray `print()` on stdout will break the protocol.
 
+### Capability profiles and tool groups — `MCP_Server/tool_policy.py` (UNIT-29)
+
+`CE_MCP_PROFILE` (readonly < analysis < patch < full, default full, unknown = readonly), `CE_MCP_ALLOW` / `CE_MCP_DENY` and `CE_MCP_TOOLSET` come from the MCP server's environment. `CATALOG` maps every tool and wire method to a `(group, tier)`; **a name that is not in it counts as the top tier**. The gate is `POLICY.check()` at the top of `CEBridgeClient.send_command` (it also inspects the requests inside `batch` and the `kind` of `start_job`, otherwise `batch_commands` would be a bypass); `POLICY.apply(mcp)` then unlists what the profile/toolset hides and `policy_info` explains it. The Lua bridge does not enforce anything. When you add a tool, add it to `CATALOG` (anything that runs code, touches files/clipboard/input or writes kernel memory is `EXEC`; anything that changes the target is at least `WRITE`) - `python tests/test_policy.py` fails until every tool and every Lua dispatcher entry is classified.
+
 ### Lua side — `MCP_Server/ce_mcp_bridge.lua`
 
 One self-contained script with its own pure-Lua JSON codec, loaded inside Cheat Engine. Key pieces:
@@ -74,7 +78,7 @@ Two files are the source of truth — there's no codegen, so you must edit both:
 
 1. In `ce_mcp_bridge.lua`: write `function cmd_foo(params) ... return { success = true, ... } end` and register it in the `commandHandlers` table inside the appropriate unit sub-block (see **Conventions -> Section markers** below). Command handlers are intentionally not top-level locals because Cheat Engine can fail to compile the full bridge once a Lua chunk exceeds 200 local variables. The handler name must match the snake_case verb-first convention (`cmd_<name>`).
 2. In `mcp_cheatengine.py`: add `@mcp.tool() def foo(...): return format_result(ce_client.send_command("foo", {...}))`.
-3. Follow the **Conventions** section below for return shape, address encoding, and naming.
+3. Follow the **Conventions** section below for return shape, address encoding, and naming. Classify the tool in `MCP_Server/tool_policy.py` (`CATALOG`: group + tier); `tests/test_policy.py` fails until you do.
 4. Reload the Lua script in CE. The Python server picks up changes automatically via pipe reconnect.
 
 ## Environment & safety constraints
@@ -84,7 +88,7 @@ Two files are the source of truth — there's no codegen, so you must edit both:
 - **Pipe name** `\\.\pipe\CE_MCP_Bridge_v99` is hardcoded in both `mcp_cheatengine.py` (as `PIPE_NAME`) and `ce_mcp_bridge.lua` (as `PIPE_NAME`). Keep them in sync if you ever rename it. The `_v99` suffix is the wire-protocol version and is independent of the bridge version (`12.0.0`).
 - **Codex config:** use TOML, not JSON. Add `[mcp_servers.cheatengine]`, `command = "python"`, and `args = ['C:\path\to\MCP_Server\mcp_cheatengine.py']`. Use TOML single-quoted strings for Windows paths so backslashes are literal, then restart Codex and verify with the `ping` tool.
 - **Anti-cheat safety** (per `AI_Context/AI_Guide_MCP_Server_Implementation.md`): prefer hardware DR0–DR3 breakpoints over software (`0xCC`) breakpoints, and prefer DBVM watches for truly invisible tracing. The existing `cmd_set_breakpoint` already uses `debug_setBreakpoint` (hardware); keep new debugging tools on that path.
-- **Env vars:** `CE_MCP_TIMEOUT` (default 30s) limits per-tool latency (keep it below the MCP host's own tool timeout); `CE_MCP_CONNECT_WAIT` (default 2s) is how long to retry a busy/re-created pipe; `CE_MCP_ALLOW_SHELL=1` enables `run_command` / `shell_execute` (default: disabled).
+- **Env vars:** `CE_MCP_TIMEOUT` (default 30s) limits per-tool latency (keep it below the MCP host's own tool timeout); `CE_MCP_CONNECT_WAIT` (default 2s) is how long to retry a busy/re-created pipe; `CE_MCP_ALLOW_SHELL=1` enables `run_command` / `shell_execute` (default: disabled). `CE_MCP_PROFILE`, `CE_MCP_ALLOW`, `CE_MCP_DENY` and `CE_MCP_TOOLSET` restrict and shrink the tool set (see the policy section above).
 
 ## Conventions (v12 overhaul)
 
