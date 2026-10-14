@@ -287,6 +287,15 @@ function enumRegisteredSymbols() return SYMS end
 REGISTERED = {}
 function registerSymbol(name, addr, dns) REGISTERED[name] = addr end
 
+CREATED = {}
+function createStructure(name)
+  local st = { Name = name, elements = {}, Count = 0 }
+  function st.addToGlobalStructureList() end
+  function st.addElement() local el = {}; st.elements[#st.elements + 1] = el; st.Count = #st.elements; return el end
+  CREATED[#CREATED + 1] = st
+  return st
+end
+
 STRUCTS = {}
 function getStructureCount() return #STRUCTS end
 function getStructure(i) return STRUCTS[i + 1] end
@@ -600,6 +609,74 @@ eq("overwriting a snapshot reuses its budget", cmd_snapshot_region({ address = 0
 eq("reserved name", cmd_snapshot_region({ address = 0x9000, size = 16, name = "live" }).error_code, "INVALID_PARAMS")
 eq("delete all", cmd_delete_snapshot({ all = true }).deleted >= 3 and serverState.snapshot_bytes == 0, true)
 
+-- ===================== struct recovery from RTTI =====================
+eq("plausibleFloat: 1.5f", U26.plausibleFloat(0x3FC00000), true)
+eq("plausibleFloat: small ints are not floats", U26.plausibleFloat(100) or U26.plausibleFloat(0xFFFFFF9C), false)
+eq("plausibleFloat: NaN is not", U26.plausibleFloat(0x7FC00000), false)
+eq("plausibleDouble: 3.5", U26.plausibleDouble(0x400C000000000000, 0, 0x400C0000), true)
+eq("plausibleDouble: an int next to a float is not a double", U26.plausibleDouble(0x3FC0000000000064, 100, 0x3FC00000), false)
+eq("plausibleDouble: two floats side by side win", U26.plausibleDouble(0x400000003FC00000, 0x3FC00000, 0x40000000), false)
+local function q8(a, v) poke(a, string.pack("<I8", v)) end
+local function d4(a, v) poke(a, string.pack("<I4", v)) end
+local DERIVED_VT, BASE_VT = GB + 0x2648, GB + 0x2608
+local function makeObj(a, int, flt, objPtr, strPtr, dval, name)
+  q8(a + 0x00, DERIVED_VT); d4(a + 0x08, int); poke(a + 0x0C, string.pack("<f", flt))
+  q8(a + 0x10, objPtr); q8(a + 0x18, strPtr); poke(a + 0x20, string.pack("<d", dval)); poke(a + 0x28, name .. "\0")
+  q8(a + 0x38, GB + 0x3500)
+end
+q8(0x2A100000, BASE_VT); q8(0x2A100100, BASE_VT)
+poke(0x2A001000, "hello world\0"); poke(0x2A001100, "hello again\0")
+makeObj(0x2A000000, 100, 1.5, 0x2A100000, 0x2A001000, 3.5, "player1")
+makeObj(0x2A000200, 250, 2.5, 0x2A100100, 0x2A001100, 7.25, "player2")
+
+r = cmd_recover_struct({ addresses = { 0x2A000000, 0x2A000200 } })
+eq("recover ok", r.success and r.class_name == "game::Derived" and r.kind == "class" and r.instances == 2, true)
+eq("recover vtable + module", r.vtable == string.format("0x%%X", DERIVED_VT) and r.module == "game.exe" and r.vtable_rva == 0x2648, true)
+eq("recover base classes", #r.bases == 2 and r.bases[2].name == "game::Base" and r.bases[2].offset == 0 and r.bases[2].virtual == false, true)
+eq("recover trims the zero tail", r.size_analyzed, 0x40)
+local F = {}
+for _, f in ipairs(r.fields or {}) do F[f.name] = f end
+eq("field: vfptr", F.vfptr and F.vfptr.offset == 0 and F.vfptr.kind == "vfptr" and F.vfptr.size == 8, true)
+eq("field: int with both samples", F.i_8 and F.i_8.kind == "int" and F.i_8.samples[1] == 100 and F.i_8.samples[2] == 250, true)
+eq("field: float", F.f_C and F.f_C.kind == "float" and F.f_C.samples[1] == 1.5 and F.f_C.samples[2] == 2.5, true)
+eq("field: pointer to another RTTI object", F.obj_10 and F.obj_10.kind == "object" and F.obj_10.type == "game::Base *", true)
+eq("field: pointer to a string", F.str_18 and F.str_18.kind == "string" and F.str_18.text == "hello world", true)
+eq("field: double", F.d_20 and F.d_20.kind == "double" and F.d_20.samples[1] == 3.5 and F.d_20.samples[2] == 7.25, true)
+eq("field: inline text", F.text_28 and F.text_28.kind == "text" and F.text_28.size == 8 and F.text_28.samples[1] == "player1", true)
+eq("field: zero gap becomes one unknown run", F.unk_30 and F.unk_30.kind == "unknown" and F.unk_30.size == 8, true)
+eq("field: pointer into the module", F.sptr_38 and F.sptr_38.kind == "static" and F.sptr_38.points_to == "game.exe+0x3500", true)
+local pos, contiguous = 0, true
+for _, f in ipairs(r.fields) do if f.offset ~= pos then contiguous = false end pos = f.offset + f.size end
+eq("fields tile the object without gaps or overlap", contiguous and pos == 0x40, true)
+eq("virtual functions", #r.virtual_functions == 3 and r.virtual_functions[1].expression == "game.exe+0x1020" and r.virtual_functions[2].index == 1, true)
+eq("virtual function sizes come from .pdata", r.virtual_functions[1].function_size == 0x10 and r.virtual_functions[3].function_size == 0x10, true)
+local c = r.c_declaration
+eq("C: struct + base comment + forward declaration", c:find("struct game__Derived {  // bases: game::Base", 1, true) ~= nil and c:find("struct game__Base;", 1, true) ~= nil, true)
+eq("C: members", c:find("void **vfptr;", 1, true) ~= nil and c:find("int i_8;", 1, true) ~= nil and c:find("float f_C;", 1, true) ~= nil
+   and c:find("game__Base *obj_10;", 1, true) ~= nil and c:find("char *str_18;", 1, true) ~= nil and c:find("double d_20;", 1, true) ~= nil
+   and c:find("char text_28[8];", 1, true) ~= nil and c:find("unsigned char unk_30[8];", 1, true) ~= nil and c:find("void *sptr_38;", 1, true) ~= nil, true)
+r = cmd_recover_struct({ address = 0x2A000000 })
+eq("single instance still classifies", r.success and #r.notes == 1, true)
+local F1 = {}
+for _, f in ipairs(r.fields or {}) do F1[f.name] = f end
+eq("single instance: int/float/double", F1.i_8 and F1.i_8.kind == "int" and F1.f_C and F1.f_C.kind == "float" and F1.d_20 and F1.d_20.kind == "double", true)
+r = cmd_recover_struct({ address = 0x2A100000 })
+eq("object with only a vptr", r.success and r.class_name == "game::Base" and #r.fields == 1 and r.size_analyzed == 8 and #r.virtual_functions == 2, true)
+eq("mixed classes are refused", cmd_recover_struct({ addresses = { 0x2A000000, 0x2A100000 } }).error:find("different classes", 1, true) ~= nil, true)
+eq("non-polymorphic memory has no RTTI", cmd_recover_struct({ address = 0x2A001000 }).error_code, "NOT_FOUND")
+eq("unreadable object", cmd_recover_struct({ address = 5 }).error_code, "INVALID_ADDRESS")
+local many = {}
+for i = 1, 17 do many[i] = 0x2A000000 end
+eq("too many instances", cmd_recover_struct({ addresses = many }).error_code, "INVALID_PARAMS")
+serverState.structures = serverState.structures or {}
+serverState.structure_next_id = serverState.structure_next_id or 1
+r = cmd_recover_struct({ addresses = { 0x2A000000, 0x2A000200 }, create = true, name = "Derived_t" })
+local st = CREATED[#CREATED]
+eq("CE structure created", r.structure_name == "Derived_t" and r.elements_created == 8 and st and st.Name == "Derived_t", true)
+eq("CE structure elements", st.elements[1].Name == "vfptr" and st.elements[1].Offset == 0 and st.elements[2].Name == "i_8" and st.elements[2].Offset == 8, true)
+eq("CE string element carries its byte size", st.elements[7].Name == "text_28" and st.elements[7].Bytesize == 8, true)
+eq("CE structure registered with the bridge", serverState.structures[r.structure_id], st)
+
 -- ===================== CE structures -> C =====================
 local function el(name, off, vt, size) return { Name = name, Offset = off, Vartype = vt, Bytesize = size } end
 local els = { el("id", 0, vtDword, 4), el("hp", 8, vtSingle, 4), el("name", 0x10, vtString, 8) }
@@ -729,6 +806,16 @@ out.tls = cmd_pe_tls_callbacks({})
 U26.CHUNK = 0x10000
 local rt = runJob("rtti_scan", {})
 out.rtti = rt
+-- fake instances of the real classes the scan found (vptr -> real vtable) for recover_struct
+out.objs = {}
+for i, c in ipairs(rt.classes or {}) do
+  if i > 30 then break end
+  if c.vfunc_count > 0 and c.this_offset == 0 then
+    local a = 0x2A000000 + i * 0x100
+    poke(a, string.pack("<I8", tonumber(c.vtable)))
+    out.objs[#out.objs + 1] = { class = c.class_name, vfuncs = c.vfunc_count, rec = cmd_recover_struct({ address = a }) }
+  end
+end
 """ if want_rtti else "") + """
 return json.encode(out)
 """
@@ -808,6 +895,28 @@ return json.encode(out)
             for c in cls[:6]:
                 print("   ", c["class_name"], "vt+%s" % hex(c["vtable_rva"]), "vfuncs=%d" % c["vfunc_count"], "bases=%s" % c["bases"][:3])
             res["rtti_ok"] = rt.get("success") and len(cls) > 0 and sane
+            # recover_struct on fake instances of those real classes: same class, same virtual functions,
+            # and function sizes that agree with Windows' own unwind table lookup
+            objs = data.get("objs", [])
+            rec_bad = vf_checked = 0
+            for o in objs:
+                rec = o["rec"]
+                if not rec.get("success") or rec["class_name"] != o["class"] or len(rec["virtual_functions"]) != o["vfuncs"]:
+                    rec_bad += 1
+                    if rec_bad <= 3: print("  recover_struct mismatch for", o["class"], rec.get("error") or (rec.get("class_name"), len(rec.get("virtual_functions", [])), o["vfuncs"]))
+                    continue
+                for v in rec["virtual_functions"]:
+                    if "function_size" not in v: continue
+                    image_base = ctypes.c_ulonglong()
+                    entry = lookup(int(v["address"], 16), ctypes.byref(image_base), None)
+                    if not entry: rec_bad += 1; continue
+                    b, e, _ = struct.unpack("<III", ctypes.string_at(entry, 12))
+                    vf_checked += 1
+                    if (e - b) != v["function_size"]:
+                        rec_bad += 1
+                        if rec_bad <= 3: print("  vfunc size mismatch", o["class"], v["address"], v["function_size"], e - b)
+            print("  recover_struct: %d real classes, %d virtual function sizes checked against RtlLookupFunctionEntry, problems: %d" % (len(objs), vf_checked, rec_bad))
+            res["recover_ok"] = len(objs) > 0 and vf_checked > 0 and rec_bad == 0
         print("  RESULT", res)
         return res
 

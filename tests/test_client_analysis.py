@@ -130,6 +130,10 @@ mod.pe_functions()
 check("pe_functions() sends only paging", params_seen["pe_functions"] == {"offset": 0, "limit": 100}, params_seen["pe_functions"])
 mod.pe_functions(address="0x140001025", include_unwind=True)
 check("pe_functions address + unwind", params_seen["pe_functions"] == {"address": "0x140001025", "offset": 0, "limit": 100, "include_unwind": True}, params_seen["pe_functions"])
+mod.recover_struct(addresses=["0x2A000000", "0x2A000200"], create=True, name="Player")
+check("recover_struct forwards instances/create/name", params_seen["recover_struct"] == {"addresses": ["0x2A000000", "0x2A000200"], "name": "Player", "create": True}, params_seen["recover_struct"])
+mod.recover_struct(address="0x2A000000", size=512)
+check("recover_struct single instance", params_seen["recover_struct"] == {"address": "0x2A000000", "size": 512}, params_seen["recover_struct"])
 mod.snapshot_region(address="0x9000", size=16, name="A")
 check("snapshot_region address", params_seen["snapshot_region"] == {"address": "0x9000", "size": 16, "name": "A"}, params_seen["snapshot_region"])
 mod.snapshot_region(module="game.exe", section=".data")
@@ -170,7 +174,7 @@ for m, want in [("pe_info", True), ("pe_functions", True), ("pe_imports", True),
 
 # ---- MCP registration / schemas
 tools = {tool.name: tool for tool in mod.mcp._tool_manager.list_tools()}
-need = ["pe_info", "pe_functions", "pe_imports", "pe_exports", "pe_tls_callbacks", "va_to_rva", "rva_to_va", "rebase_address", "export_names", "export_structures",
+need = ["pe_info", "pe_functions", "recover_struct", "pe_imports", "pe_exports", "pe_tls_callbacks", "va_to_rva", "rva_to_va", "rebase_address", "export_names", "export_structures",
         "import_names", "rtti_scan_module", "find_string_refs", "find_code_caves", "find_pointer_path", "snapshot_region", "list_snapshots",
         "delete_snapshot", "diff_snapshots"]
 check("all new tools registered with MCP", all(n in tools for n in need), [n for n in need if n not in tools])

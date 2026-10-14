@@ -2970,6 +2970,33 @@ def pe_functions(module: str = "", address: str = "", offset: int = 0, limit: in
     return format_result(ce_client.send_command("pe_functions", _params(
         module=module, address=address, offset=offset, limit=limit, include_unwind=include_unwind or None)))
 
+@mcp.tool()
+def recover_struct(address: str = "", addresses: list[str] = None, size: int = 0, name: str = "", create: bool = False,
+                   max_vtable_entries: int = 0) -> str:
+    """Recover a class layout from live instance(s) of a polymorphic MSVC class.
+
+    The object's vtable pointer (offset 0) leads to its RTTI: class name, base classes (with subobject offsets) and the
+    virtual function table (each virtual function with its address and, on x64, exact size from .pdata). The fields are
+    inferred by dissecting the memory: pointers (typed as `ClassName *` when they point at another RTTI object, `char *`
+    for text, vfptr for secondary vtables, module+RVA for static data), floats, doubles, ints, inline char buffers and
+    zero gaps. Pass several instances of the SAME class in `addresses` for much better guesses: values that differ are
+    data, the all-zero tail is trimmed and mixed classes are refused.
+
+    Args:
+        address / addresses: Object address(es), 1 to 16 instances of one class.
+        size: Bytes to analyse (default 0x100, max 0x4000; the all-zero tail is dropped).
+        name: Name for the CE structure when create=true (default: the class name).
+        create: Also create the CE structure definition (visible in the Structures list; for strings it sets the byte size).
+        max_vtable_entries: Cap for the virtual function listing (default 64).
+
+    Returns class_name, bases, vtable, fields[{offset,size,kind,type,name,samples}], virtual_functions, c_declaration
+    (ready for IDA's declare_c_type) and, with create, structure_id. This is a heuristic: ints that look like floats (or
+    the reverse), and two floats at an 8-aligned offset, can be misjudged; check the samples.
+    """
+    return format_result(ce_client.send_command("recover_struct", _params(
+        address=address, addresses=addresses, size=size or None, name=name, create=create or None,
+        max_vtable_entries=max_vtable_entries or None)))
+
 # >>> END UNIT-27 <<<
 
 if __name__ == "__main__":

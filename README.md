@@ -293,6 +293,7 @@ And many more at `AI_Context/MCP_Bridge_Command_Reference.md`
 | `pe_info`, `pe_imports`, `pe_exports`, `pe_tls_callbacks` | Parse a loaded module's PE headers from memory: sections (rwx), imports with the live IAT values (spot hooks), exports with forwarders, TLS callbacks |
 | `rtti_scan_module` | Every MSVC RTTI class in a module: vtable address/RVA, virtual function count, base-class chain (x64 and x86) |
 | `pe_functions` | Exact x64 function boundaries from `.pdata` (also used by `find_function_boundaries`, `analyze_function` and string refs): unwind info, exception handler, split-fragment resolution |
+| `recover_struct` | Class layout from live instance(s) of a polymorphic MSVC class: RTTI name/bases, virtual functions with exact sizes, inferred fields (typed pointers, text, floats, doubles, ints), C declaration and an optional CE structure |
 | `find_string_refs` | Code (`lea reg,[rip+x]`, absolute operands) and data that reference a string, with the function each reference is in |
 | `find_code_caves` | Runs of `0xCC`/`0x00`/`0x90` padding for patches and hooks |
 | `find_pointer_path` | Reverse pointer search: static `[[module+rva]+o1]+o2` chains that reach a heap address, verified by re-resolving |

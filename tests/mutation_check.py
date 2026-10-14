@@ -45,7 +45,7 @@ MUTANTS = [
      "local offs, cost = {}, entry.t - val\n                for _, o in ipairs(entry.offs) do offs[#offs + 1] = o; cost = cost + o end\n                offs[#offs + 1] = entry.t - val", "caught"),
     ("diff_ignores_unchanged_pairs", ANALYSIS, 'if (pc[k] == "C" and same) or (pc[k] == "U" and not same) then ok = false; break end', 'if (pc[k] == "C" and same) then ok = false; break end', "caught"),
     ("export_forwarders_undetected", ANALYSIS, "local function isForwarder(rva) return rva >= dir.rva and rva < dir.rva + dir.size end", "local function isForwarder(rva) return false end", "caught"),
-    ("rtti_base_classes_dropped", ANALYSIS, "for bi = 0, math.min(nb, 64) - 1 do", "for bi = 0, -1 do", "caught"),
+    ("rtti_base_classes_dropped", ANALYSIS, "for i = 0, math.min(nb, 64) - 1 do", "for i = 0, -1 do", "caught"),
     ("snapshot_budget_ignored", ANALYSIS, "if total + size > U26.SNAP_MAX_TOTAL then", "if false then", "caught"),
     ("string_match_start_ignored", ANALYSIS, "if anyMatch or s == 1 or data:byte(s - 1) == 0 then", "if true then", "caught"),
     ("import_ordinals_misread", ANALYSIS, "if (e.thunk & ordBit) ~= 0 then", "if false then", "caught"),
@@ -56,6 +56,16 @@ MUTANTS = [
     ("analyze_function_stops_at_first_ret", ANALYSIS, "if (b1 == 0xC3 or b1 == 0xC2) and not pd then", "if (b1 == 0xC3 or b1 == 0xC2) then", "caught"),
     ("find_function_boundaries_ignores_pdata", ANALYSIS, "        if okPd and pd then\n            return {\n                success = true, found = true, query_address", "        if false and pd then\n            return {\n                success = true, found = true, query_address", "caught"),
     ("exception_handler_not_read", ANALYSIS, "    elseif (flags & 3) ~= 0 then\n        local h = U26.u32(mod.base + tail)", "    elseif false then\n        local h = U26.u32(mod.base + tail)", "caught"),
+    # --- UNIT-27 part B (struct recovery)
+    ("recover_pointer_detection_off", ANALYSIS, "            if anyPtr and onlyPtrOrNull then", "            if false then", "caught"),
+    ("recover_mixed_classes_accepted", ANALYSIS, "elseif one.raw_name ~= info.raw_name or one.vtable ~= info.vtable then", "elseif false then", "caught"),
+    ("recover_tail_not_trimmed", ANALYSIS, "    size = math.max(P, ((last + 3) // 4) * 4)", "    size = size", "caught"),
+    ("recover_floats_become_ints", ANALYSIS, "            elseif allFloat then", "            elseif false then", "caught"),
+    ("recover_zero_runs_not_merged", ANALYSIS, 'if prev and prev.kind == "unknown" and prev.offset + prev.size == off then', "if false then", "caught"),
+    ("recover_inline_text_missed", ANALYSIS, "            if len >= 4 and off + len < size and s1:byte(off + len + 1) == 0 then", "            if false then", "caught"),
+    ("recover_string_pointers_untyped", ANALYSIS, "    local text = U26.printableAt(v)\n    if text then return \"string\", text end", "    local text = nil\n    if text then return \"string\", text end", "caught"),
+    ("recover_int_next_to_float_read_as_double", ANALYSIS, "if low ~= 0 and (low <= 0xFFFF or low >= 0xFFFF0000) then return false end", "if false then return false end", "caught"),
+    ("rtti_bases_offsets_ignored", ANALYSIS, 'bases[#bases + 1] = { name = U26.demangle(nm), offset = mdisp, virtual = (pdisp ~= -1), contained = contained }', 'bases[#bases + 1] = { name = U26.demangle(nm), offset = 99, virtual = true, contained = contained }', "caught"),
     # Defensive only: a false x86 locator is harmless unless something points at it, so no result changes.
     ("x86_locator_sanity_check_removed", ANALYSIS, "ok = nb >= 1 and nb <= 64 and arr >= mod.base and arr < mod.base + mod.size", "ok = true", "survives"),
 ]

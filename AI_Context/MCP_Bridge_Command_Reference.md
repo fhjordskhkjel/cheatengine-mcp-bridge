@@ -3452,6 +3452,13 @@ The MCP tools `rtti_scan_module`, `find_string_refs`, `find_code_caves` and `fin
 
 `find_function_boundaries` and `analyze_function` use the table first (`method:"pdata"`, `exact:true`; `analyze_function` then walks the whole range, including code after the first `ret`) and fall back to the old prologue/ret heuristic (`method:"heuristic"`). `find_string_refs` adds `function_start`/`function_rva` to references inside a known function.
 
+### Struct recovery (`recover_struct`)
+`address` or `addresses` (1 to 16 instances of **one** class), `size` (default 0x100, max 0x4000), `create`, `name`, `max_vtable_entries`. The vtable pointer at offset 0 must lead to MSVC RTTI (a polymorphic class); otherwise `NOT_FOUND`. Instances of different classes are refused.
+
+Returns `class_name`/`raw_name`/`kind`, `module`, `vtable`, `this_offset`, `bases[{name,offset,virtual}]` (first entry is the class itself), `size_analyzed` (the all-zero tail is dropped), `fields[{offset,size,kind,type,name,samples,points_to?,text?}]`, `virtual_functions[{index,address,expression,function_size?}]`, `c_declaration` and `notes`. Field kinds: `vfptr`, `object` (pointer to another RTTI object, typed `Class *`), `string` (`char *`), `static` (pointer into a module, `points_to` = `module+0xRVA`), `heap` (`void *`), `text` (inline char buffer), `double`, `float`, `int`, `unknown` (zero runs, merged). With `create:true` a CE structure is created (`structure_id`, `elements_created`; text buffers get their byte size; unknown runs are left as gaps).
+
+Heuristics, in order, per slot: pointer-sized pointer (or null) in every instance; inline printable text (>= 4 chars + NUL); double at an 8-aligned offset (not when both halves are plausible floats); all-zero; float when every non-zero value is a plausible float (|x| between 1e-6 and 1e7, not a small integer); otherwise int. More instances make the guesses better. Known limits: two floats at an 8-aligned offset where one is 0.0 can read as a double, and a bare pointer to a non-polymorphic heap object stays `void *`.
+
 <!-- UNIT-27 end -->
 
 ---
