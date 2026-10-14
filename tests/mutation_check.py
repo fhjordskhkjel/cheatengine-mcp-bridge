@@ -19,13 +19,14 @@ from testkit import BRIDGE_LUA, EXIT_SKIP
 TESTS = Path(__file__).resolve().parent
 
 ROBUST, JOBS, ANALYSIS = "test_lua_robustness.py", "test_lua_jobs.py", "test_lua_analysis.py"
+BREAKPOINTS = "test_lua_breakpoints.py"
 
 # (name, suite, old text, new text, expected) - expected "caught" unless the bug cannot change any observable result
 MUTANTS = [
     # --- JSON codec, replies and breakpoint recording
     ("int64_numbers_lossy", ROBUST, 'if math.type(val) == "integer" then return string.format("%d", val) end', 'if false then return string.format("%d", val) end', "caught"),
     ("invalid_utf8_not_sanitized", ROBUST, "sanitize_utf8(val):gsub('[%z\\1-\\31\\\\\"]', escape_char)", "val:gsub('[%z\\1-\\31\\\\\"]', escape_char)", "caught"),
-    ("bp_callback_can_leave_target_halted", ROBUST, "local ok, err = pcall(body)", "local ok, err = true, body()", "caught"),
+    ("bp_callback_can_leave_target_halted", ROBUST, "local ok, result = pcall(body)", "local ok, result = true, body()", "caught"),
     ("bp_hit_buffer_uncapped", ROBUST, "if n >= MAX_HITS_PER_BP then", "if false then", "caught"),
     # --- UNIT-25 (jobs, reads, batch)
     ("scan_busy_guard_removed", JOBS, '    if serverState.scan_job_id then\n        return { success = false, error = "Scan job "', '    if false then\n        return { success = false, error = "Scan job "', "caught"),
@@ -66,6 +67,22 @@ MUTANTS = [
     ("recover_string_pointers_untyped", ANALYSIS, "    local text = U26.printableAt(v)\n    if text then return \"string\", text end", "    local text = nil\n    if text then return \"string\", text end", "caught"),
     ("recover_int_next_to_float_read_as_double", ANALYSIS, "if low ~= 0 and (low <= 0xFFFF or low >= 0xFFFF0000) then return false end", "if false then return false end", "caught"),
     ("rtti_bases_offsets_ignored", ANALYSIS, 'bases[#bases + 1] = { name = U26.demangle(nm), offset = mdisp, virtual = (pdisp ~= -1), contained = contained }', 'bases[#bases + 1] = { name = U26.demangle(nm), offset = 99, virtual = true, contained = contained }', "caught"),
+    # --- UNIT-27 part C (breakpoint control)
+    ("bp_condition_ignored", BREAKPOINTS, "    local pass, condErr = BPX.test(bp)\n    if not pass then", "    local pass, condErr = true, nil\n    if not pass then", "caught"),
+    ("bp_max_hits_not_enforced", BREAKPOINTS, "    if bp.max_hits and (bp.total_hits or 0) >= bp.max_hits then", "    if false then", "caught"),
+    ("bp_break_mode_resumes_anyway", BREAKPOINTS, '        if ok and result == "halt" then return 0 end', "        if false then return 0 end", "caught"),
+    ("bp_watchdog_never_resumes", BREAKPOINTS, "    if now >= h.deadline or now >= h.hard_deadline then", "    if false then", "caught"),
+    ("bp_data_alignment_unchecked", BREAKPOINTS, "        if addr % size ~= 0 then", "        if false then", "caught"),
+    ("bp_read_filter_removed", BREAKPOINTS, '        if accessType == "r" and prev ~= nil and value ~= prev then return nil end', "        if false then return nil end", "caught"),
+    ("bp_detach_keeps_the_slot", BREAKPOINTS, "    if bp.slot then\n        serverState.hw_bp_slots[bp.slot] = nil\n        bp.slot = nil\n    end\n    bp.detached = true", "    bp.detached = true", "caught"),
+    ("bp_debug_continue_keeps_halted", BREAKPOINTS, '        if method == "run" then\n            serverState.halted = nil', '        if false then\n            serverState.halted = nil', "caught"),
+    ("bp_cleanup_leaves_thread_halted", BREAKPOINTS, "    if serverState.halted then\n        pcall(debug_continueFromBreakpoint, co_run)\n        serverState.halted = nil\n    end\n\n    -- 1. Remove all", "    if false then\n        pcall(debug_continueFromBreakpoint, co_run)\n        serverState.halted = nil\n    end\n\n    -- 1. Remove all", "caught"),
+    ("bp_failed_install_leaks_state", BREAKPOINTS, '        serverState.breakpoints[bpId] = nil\n        serverState.breakpoint_hits[bpId] = nil\n        serverState.hw_bp_slots[slot] = nil\n        return { success = false, error = "debug_setBreakpoint failed: "', '        return { success = false, error = "debug_setBreakpoint failed: "', "caught"),
+    ("bp_value_changed_lost", BREAKPOINTS, "            value_changed = changed,", "            value_changed = nil,", "caught"),
+    ("bp_condition_failures_not_flagged", BREAKPOINTS, "    if condErr then hit.condition_error = condErr end", "    -- not flagged", "caught"),
+    ("bp_outside_resume_not_noticed", BREAKPOINTS, "    if okB and not broken and not grace then", "    if false then", "caught"),
+    ("bp_remove_does_not_resume", BREAKPOINTS, '        if serverState.halted and serverState.halted.id == bpId then BPX.resume("breakpoint removed") end', "", "caught"),
+    ("bp_break_ignores_already_halted", BREAKPOINTS, "    if bp.mode == \"break\" and not serverState.halted then", "    if bp.mode == \"break\" then", "caught"),
     # Defensive only: a false x86 locator is harmless unless something points at it, so no result changes.
     ("x86_locator_sanity_check_removed", ANALYSIS, "ok = nb >= 1 and nb <= 64 and arr >= mod.base and arr < mod.base + mod.size", "ok = true", "survives"),
 ]

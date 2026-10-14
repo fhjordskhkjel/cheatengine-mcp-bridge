@@ -134,6 +134,20 @@ mod.recover_struct(addresses=["0x2A000000", "0x2A000200"], create=True, name="Pl
 check("recover_struct forwards instances/create/name", params_seen["recover_struct"] == {"addresses": ["0x2A000000", "0x2A000200"], "name": "Player", "create": True}, params_seen["recover_struct"])
 mod.recover_struct(address="0x2A000000", size=512)
 check("recover_struct single instance", params_seen["recover_struct"] == {"address": "0x2A000000", "size": 512}, params_seen["recover_struct"])
+mod.set_breakpoint("0x1000")
+check("set_breakpoint defaults send no new options", params_seen["set_breakpoint"] == {"address": "0x1000", "capture_registers": True, "capture_stack": False, "stack_depth": 16}, params_seen["set_breakpoint"])
+mod.set_breakpoint("0x1000", id="x", condition="RAX==5", mode="break", max_hits=3, halt_timeout_ms=2000, inspect=[{"expr": "RDX", "size": 8}])
+check("set_breakpoint forwards condition/mode/max_hits/halt_timeout/inspect", params_seen["set_breakpoint"] == {
+    "address": "0x1000", "id": "x", "capture_registers": True, "capture_stack": False, "stack_depth": 16, "condition": "RAX==5",
+    "mode": "break", "max_hits": 3, "halt_timeout_ms": 2000, "inspect": [{"expr": "RDX", "size": 8}]}, params_seen["set_breakpoint"])
+mod.set_data_breakpoint("0x9000")
+check("set_data_breakpoint defaults", params_seen["set_data_breakpoint"] == {"address": "0x9000", "access_type": "w", "size": 4}, params_seen["set_data_breakpoint"])
+mod.set_data_breakpoint("0x9000", access_type="rw", size=8, condition="1", max_hits=2)
+check("set_data_breakpoint forwards options", params_seen["set_data_breakpoint"] == {"address": "0x9000", "access_type": "rw", "size": 8, "condition": "1", "max_hits": 2}, params_seen["set_data_breakpoint"])
+mod.get_halted_state()
+check("get_halted_state defaults", params_seen["get_halted_state"] == {"stack_depth": 16}, params_seen["get_halted_state"])
+mod.get_halted_state(stack_depth=4, extend_ms=500)
+check("get_halted_state options", params_seen["get_halted_state"] == {"stack_depth": 4, "extend_ms": 500}, params_seen["get_halted_state"])
 mod.snapshot_region(address="0x9000", size=16, name="A")
 check("snapshot_region address", params_seen["snapshot_region"] == {"address": "0x9000", "size": 16, "name": "A"}, params_seen["snapshot_region"])
 mod.snapshot_region(module="game.exe", section=".data")
@@ -167,14 +181,14 @@ mod.find_string_refs(address="0x1000", wide=True, match="any", include_data=Fals
 check("find_string_refs: address/wide/any/no-data", params_seen["start_job"]["params"] == {"address": "0x1000", "wide": True, "match": "any", "include_data": False}, params_seen["start_job"])
 
 # ---- retry policy table for the new bridge methods
-for m, want in [("pe_info", True), ("pe_functions", True), ("pe_imports", True), ("pe_exports", True), ("pe_tls_callbacks", True), ("va_to_rva", True),
+for m, want in [("pe_info", True), ("get_halted_state", True), ("pe_functions", True), ("pe_imports", True), ("pe_exports", True), ("pe_tls_callbacks", True), ("va_to_rva", True),
                 ("rva_to_va", True), ("rebase_address", True), ("export_names", True), ("export_structures", True), ("diff_snapshots", True),
                 ("snapshot_region", True), ("list_snapshots", True), ("delete_snapshot", True), ("import_names", False), ("start_job", False)]:
     check("is_idempotent(%s)==%s" % (m, want), mod.is_idempotent(m) == want)
 
 # ---- MCP registration / schemas
 tools = {tool.name: tool for tool in mod.mcp._tool_manager.list_tools()}
-need = ["pe_info", "pe_functions", "recover_struct", "pe_imports", "pe_exports", "pe_tls_callbacks", "va_to_rva", "rva_to_va", "rebase_address", "export_names", "export_structures",
+need = ["pe_info", "get_halted_state", "pe_functions", "recover_struct", "pe_imports", "pe_exports", "pe_tls_callbacks", "va_to_rva", "rva_to_va", "rebase_address", "export_names", "export_structures",
         "import_names", "rtti_scan_module", "find_string_refs", "find_code_caves", "find_pointer_path", "snapshot_region", "list_snapshots",
         "delete_snapshot", "diff_snapshots"]
 check("all new tools registered with MCP", all(n in tools for n in need), [n for n in need if n not in tools])

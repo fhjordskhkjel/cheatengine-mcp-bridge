@@ -214,7 +214,8 @@ Use the `ping` tool to verify connectivity:
 ### Debugging
 | Tool | Description |
 |------|-------------|
-| `set_breakpoint`, `set_data_breakpoint` | Hardware breakpoints |
+| `set_breakpoint`, `set_data_breakpoint` | Hardware breakpoints with conditions (`RAX==5`, `u32(RDX+8)==0x1234`), `max_hits`, validation, and a `mode="break"` that stops the thread for inspection |
+| `get_halted_state`, `debug_continue` | Inspect a thread stopped by a break-mode breakpoint (fresh registers, instruction, stack, captured memory), then run / step it. A watchdog resumes it by itself, so a lost client cannot freeze the game |
 | `start_dbvm_watch` | Ring -1 invisible tracing |
 
 ### Process Lifecycle

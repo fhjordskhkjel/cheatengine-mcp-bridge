@@ -927,25 +927,55 @@ def dissect_structure(address: str, size: int = 256) -> str:
 # --- DEBUGGING & BREAKPOINTS ---
 
 @mcp.tool()
-def set_breakpoint(address: str, id: str = None, capture_registers: bool = True, capture_stack: bool = False, stack_depth: int = 16) -> str:
-    """Set a hardware execution breakpoint. Non-breaking/Logging only."""
-    return format_result(ce_client.send_command("set_breakpoint", {
-        "address": address, 
-        "id": id,
-        "capture_registers": capture_registers,
-        "capture_stack": capture_stack,
-        "stack_depth": stack_depth
-    }))
+def set_breakpoint(address: str, id: str = None, capture_registers: bool = True, capture_stack: bool = False, stack_depth: int = 16,
+                   condition: str = "", mode: str = "log", max_hits: int = 0, halt_timeout_ms: int = 0, inspect: list[dict] = None) -> str:
+    """Set a hardware execution breakpoint (a debug register: invisible to most anti-cheat, at most 4 at a time).
+
+    By default it only LOGS: every hit records registers (and optionally the stack) and the thread keeps running;
+    read them with get_breakpoint_hits.
+
+    Args:
+        address: Address or symbol.
+        id: Name for the breakpoint (default: the address; a clash gets a _2 suffix).
+        capture_registers / capture_stack / stack_depth: What to record per hit.
+        condition: Only record hits where this expression is true, e.g. "RAX == 5", "u32(RDX+8) == 0x1234 and RCX ~= 0",
+                   "f32(RSP+0x20) > 100". It sees the registers (RAX..R15, RIP, EFLAGS; x86: EAX..), the memory readers
+                   u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 ptr (return nil for unreadable memory), hits() (matched so far),
+                   seen() (all hits) and abs/min/max/floor. Nothing else (no os/io/load), and it runs under an
+                   instruction budget so it cannot hang the target. A condition that errors still records the hit,
+                   flagged with `condition_error`, and is switched off after 5 failures.
+        mode: "log" (default) or "break": leave the thread STOPPED for inspection. Use get_halted_state to look at it
+              and debug_continue (run / step_into / step_over) to resume. A watchdog resumes it by itself after
+              halt_timeout_ms so a vanished client can never leave the game frozen.
+        max_hits: Detach automatically after this many matching hits (0 = unlimited).
+        halt_timeout_ms: Watchdog timeout for mode "break" (default 10000, max 300000).
+        inspect: For mode "break": [{"expr": "RDX+0x10", "size": 32}] memory to capture at the moment of the hit
+                 (the address is an expression like a condition; at most 8 entries, 256 bytes each).
+    """
+    return format_result(ce_client.send_command("set_breakpoint", _params(
+        address=address, id=id, capture_registers=capture_registers, capture_stack=capture_stack, stack_depth=stack_depth,
+        condition=condition, mode=mode if mode != "log" else None, max_hits=max_hits or None,
+        halt_timeout_ms=halt_timeout_ms or None, inspect=inspect)))
 
 @mcp.tool()
-def set_data_breakpoint(address: str, id: str = None, access_type: str = "w", size: int = 4) -> str:
-    """Set a hardware data breakpoint (watchpoint). Types: 'r' (read), 'w' (write), 'rw' (access)."""
-    return format_result(ce_client.send_command("set_data_breakpoint", {
-        "address": address, 
-        "id": id,
-        "access_type": access_type,
-        "size": size
-    }))
+def set_data_breakpoint(address: str, id: str = None, access_type: str = "w", size: int = 4,
+                        condition: str = "", mode: str = "log", max_hits: int = 0, halt_timeout_ms: int = 0, inspect: list[dict] = None) -> str:
+    """Set a hardware data breakpoint (watchpoint): finds what writes/accesses a value.
+
+    Args:
+        address: Address to watch. It must be aligned to `size`.
+        access_type: 'w' (writes, default) or 'rw' (reads and writes); 'r' is an approximation because x86 debug
+                     registers cannot watch reads only: it watches both and drops hits where the value changed.
+        size: 1, 2, 4 (default) or 8 bytes.
+        condition / mode / max_hits / halt_timeout_ms / inspect: as for set_breakpoint.
+
+    Each hit records the value (read with the watched size), previous_value, value_changed (a write of the same value
+    shows value_changed=false), the registers and the instruction that touched it.
+    """
+    return format_result(ce_client.send_command("set_data_breakpoint", _params(
+        address=address, id=id, access_type=access_type, size=size,
+        condition=condition, mode=mode if mode != "log" else None, max_hits=max_hits or None,
+        halt_timeout_ms=halt_timeout_ms or None, inspect=inspect)))
 
 @mcp.tool()
 def remove_breakpoint(id: str) -> str:
@@ -2131,6 +2161,8 @@ def debug_continue(method: str = "run") -> str:
 
     method: one of 'run' (co_run), 'step_into' (co_stepinto), 'step_over' (co_stepover).
     Requires the debugger to be attached. Returns {success}.
+    Resumes a thread stopped by a mode="break" breakpoint ("run" ends the stop; a step keeps it under bridge
+    control, see get_halted_state).
     """
     return format_result(ce_client.send_command("debug_continue", {"method": method}))
 
@@ -2996,6 +3028,18 @@ def recover_struct(address: str = "", addresses: list[str] = None, size: int = 0
     return format_result(ce_client.send_command("recover_struct", _params(
         address=address, addresses=addresses, size=size or None, name=name, create=create or None,
         max_vtable_entries=max_vtable_entries or None)))
+
+@mcp.tool()
+def get_halted_state(stack_depth: int = 16, extend_ms: int = 0) -> str:
+    """State of a thread stopped by a mode="break" breakpoint (or by stepping from one).
+
+    Returns halted=false when nothing is stopped (last_halt says how the last stop ended: resumed, timeout,
+    breakpoint removed, resumed outside the bridge). When halted: fresh registers, the instruction at RIP, the stack,
+    the memory the breakpoint asked to inspect, the hit, and auto_resume_in_seconds (the watchdog countdown).
+    extend_ms postpones the watchdog. Resume with debug_continue(method="run" | "step_into" | "step_over"); after a step,
+    call this again to see the new position.
+    """
+    return format_result(ce_client.send_command("get_halted_state", _params(stack_depth=stack_depth, extend_ms=extend_ms or None)))
 
 # >>> END UNIT-27 <<<
 

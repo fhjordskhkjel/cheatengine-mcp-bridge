@@ -350,7 +350,7 @@ eq("finished jobs pruned to 20(+1 newest)", n <= 21, true)
 return table.concat(results, "\n")
 '''
 
-program = STUBS + "\n" + prefix + "\n" + read_block + "\n" + scan_block + "\n" + results_block + "\n" + unit + "\n" + TESTS
+program = STUBS + "\n" + prefix + "\n" + read_block + "\n" + scan_block + "\n" + results_block + "\n" + 'local BPX = { watchdog = function() return false end }\n' + unit + "\n" + TESTS
 ok, msg = run_lua(program, "ops_test")
 print(msg)
 print("LUA EXEC", "OK" if ok else "ERROR")

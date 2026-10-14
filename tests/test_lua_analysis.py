@@ -732,7 +732,7 @@ def make_program(images_and_body):
     return images_and_body
 
 
-common = STUBS + "\n" + prefix + "\n" + read_block + "\n" + scan_block + "\n" + unit25 + "\n" + unit26 + "\n" + unit27 + "\n" + func_block_text + "\n" + resolve_block + "\n" + register_block + "\n"
+common = STUBS + "\n" + 'local BPX = { watchdog = function() return false end }\n' + prefix + "\n" + read_block + "\n" + scan_block + "\n" + unit25 + "\n" + unit26 + "\n" + unit27 + "\n" + func_block_text + "\n" + resolve_block + "\n" + register_block + "\n"
 x64_prog = common + page_lines(X64_BASE, img64) + "\n" + HELPERS + TESTS_X64
 if os.environ.get("BRIDGE_TEST_DUMP"):
     open(os.environ["BRIDGE_TEST_DUMP"], "w", encoding="utf-8").write(x64_prog)
