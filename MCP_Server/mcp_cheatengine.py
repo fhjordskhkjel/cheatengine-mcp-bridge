@@ -228,10 +228,12 @@ CE_MCP_PORT = _parse_tcp_port(os.environ.get("CE_MCP_PORT"))
 _IDEMPOTENT_PREFIXES = (
     "get_", "read_", "list_", "enum_", "find_", "is_", "aob_scan", "persistent_scan_get_",
     "md5_", "checksum_", "disassemble", "analyze_", "validate_", "dbk_get_",
+    "pe_", "va_to_", "rva_to_", "rebase_", "export_", "diff_",
 )
 _IDEMPOTENT_EXACT = frozenset({
     "ping", "bridge_status", "search_string", "generate_signature", "dissect_structure", "file_exists",
     "compare_memory", "assemble_instruction", "auto_assemble_check", "in_main_thread",
+    "list_snapshots", "snapshot_region", "delete_snapshot",
 })
 # Look read-only by name but consume or change state.
 _NOT_IDEMPOTENT = frozenset({"get_breakpoint_hits", "read_region_from_file"})
@@ -2682,6 +2684,265 @@ def list_jobs() -> str:
     return format_result(ce_client.send_command("list_jobs"))
 
 # >>> END UNIT-25 <<<
+
+# >>> BEGIN UNIT-26 Analysis: PE/modules, address translation, RTTI, string refs, code caves, pointer paths, snapshots <<<
+
+
+def _params(**kw):
+    """Keyword arguments -> bridge params, dropping None / empty strings so Lua sees 'not given'."""
+    return {k: v for k, v in kw.items() if v is not None and v != ""}
+
+
+def _run_job(kind, params, wait_seconds, limit, offset=0):
+    """start_job + wait up to `wait_seconds` + get_job_result. Returns the job id and status if still running."""
+    started = ce_client.send_command("start_job", {"kind": kind, "params": params})
+    if not isinstance(started, dict) or not started.get("success"):
+        return started
+    job_id = started["job_id"]
+    deadline = time.monotonic() + max(0.0, min(float(wait_seconds), MAX_WAIT_FOR_JOB_SECONDS))
+    while True:
+        status = ce_client.send_command("get_job", {"job_id": job_id})
+        if not isinstance(status, dict) or not status.get("success"):
+            return status
+        state = status.get("state")
+        if state == "running":
+            if time.monotonic() >= deadline:
+                status["timed_out"] = True
+                status["hint"] = (f"Still running in the background. Call wait_for_job('{job_id}') and then "
+                                  f"get_job_result('{job_id}') for the data.")
+                return status
+            time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+            continue
+        if state == "done":
+            return ce_client.send_command("get_job_result", {"job_id": job_id, "offset": offset, "limit": limit})
+        return status
+
+
+# ---- PE / modules ---------------------------------------------------------------------------------
+
+@mcp.tool()
+def pe_info(module: str = "") -> str:
+    """Parse a loaded module's PE headers from memory: architecture, entry point, preferred vs actual base
+    (relocated?), sections with rwx flags and addresses, data directories, subsystem, timestamp.
+
+    Args:
+        module: Module name (case-insensitive, substring ok) or an address inside it. Empty = the main module.
+    """
+    return format_result(ce_client.send_command("pe_info", _params(module=module)))
+
+
+@mcp.tool()
+def pe_imports(module: str = "", dll: str = "", offset: int = 0, limit: int = 100) -> str:
+    """List a module's imports: dll, function name (or ordinal + hint), IAT slot address, and the address the
+    IAT currently holds (`resolved`, plus the module that contains it, so you can spot hooked imports).
+
+    Args:
+        module: Module name or address inside it (empty = main module).
+        dll: Only imports from DLLs whose name contains this text.
+        offset, limit: Pagination (default 100 per page).
+    """
+    return format_result(ce_client.send_command("pe_imports", _params(module=module, dll=dll, offset=offset, limit=limit)))
+
+
+@mcp.tool()
+def pe_exports(module: str = "", name_contains: str = "", offset: int = 0, limit: int = 100) -> str:
+    """List a module's exports: name, ordinal, RVA, address and forwarder text for forwarded exports.
+
+    Args:
+        module: Module name or address inside it (empty = main module).
+        name_contains: Case-insensitive name filter.
+        offset, limit: Pagination (default 100 per page).
+    """
+    return format_result(ce_client.send_command("pe_exports", _params(module=module, name_contains=name_contains, offset=offset, limit=limit)))
+
+
+@mcp.tool()
+def pe_tls_callbacks(module: str = "") -> str:
+    """List a module's TLS callbacks (code that runs before the entry point; common in packers and anti-debug).
+    Returns each callback's address, RVA, section and owning module, plus the TLS directory fields."""
+    return format_result(ce_client.send_command("pe_tls_callbacks", _params(module=module)))
+
+
+# ---- address translation / IDA exchange -----------------------------------------------------------
+
+@mcp.tool()
+def va_to_rva(address: str = "", addresses: list[str] = None, ida_image_base: str = "", include_section: bool = True) -> str:
+    """Convert runtime addresses to module + RVA (and section). Give `address` or a list in `addresses`.
+
+    If `ida_image_base` is given (IDA's image base, from IDA's metadata), each result also carries
+    `ida_address` = ida_image_base + rva, i.e. the address to jump to in IDA.
+    Result `expression` is a CE-usable "module+0xRVA" string.
+    """
+    return format_result(ce_client.send_command("va_to_rva", _params(
+        address=address, addresses=addresses, ida_image_base=ida_image_base, include_section=include_section)))
+
+
+@mcp.tool()
+def rva_to_va(module: str = "", rva: str = "", rvas: list[str] = None, ida_image_base: str = "") -> str:
+    """Convert RVAs of a module into runtime addresses (give `rva` or `rvas`; hex strings like "0x1A2B" or numbers).
+    With `ida_image_base` also returns the matching IDA address."""
+    return format_result(ce_client.send_command("rva_to_va", _params(module=module, rva=rva, rvas=rvas, ida_image_base=ida_image_base)))
+
+
+@mcp.tool()
+def rebase_address(address: str = "", addresses: list[str] = None, from_base: str = "", from_module: str = "",
+                   to_base: str = "", to_module: str = "") -> str:
+    """Move addresses between two images loaded at different bases, e.g. an IDA address into the running
+    process: from_base="0x140000000" (IDA image base), to_module="game.exe". Each side is a base address
+    or a module name. Returns the new address and the shared RVA."""
+    return format_result(ce_client.send_command("rebase_address", _params(
+        address=address, addresses=addresses, from_base=from_base, from_module=from_module, to_base=to_base, to_module=to_module)))
+
+
+@mcp.tool()
+def export_names(module: str = "", sources: list[str] = None, format: str = "json", ida_image_base: str = "",
+                 include_types: bool = True) -> str:
+    """Export names for use in IDA: CE registered symbols and/or RTTI vtables of one module.
+
+    Args:
+        module: Module name (empty = main module).
+        sources: any of "symbols" (CE registered symbols inside the module) and "rtti" (vtables found by the last
+                 rtti_scan_module of this module). Default both.
+        format: "json" (entries with rva, name, ida_name, kind) or "idapython" (a ready-to-run IDAPython script that
+                renames and comments each address relative to the loaded image base).
+        ida_image_base: Adds `ida_address` to each entry.
+        include_types: Also return `c_declarations` (vtable/class struct skeletons built from RTTI) that can be fed
+                       to IDA's declare_c_type.
+    """
+    return format_result(ce_client.send_command("export_names", _params(
+        module=module, sources=sources, format=format, ida_image_base=ida_image_base, include_types=include_types)))
+
+
+@mcp.tool()
+def export_structures(name: str = "") -> str:
+    """C declarations for Cheat Engine's structure definitions (all, or the one called `name`), with padding for gaps
+    and a trailing pad up to the declared size. Paste into IDA's Local Types / declare_c_type."""
+    return format_result(ce_client.send_command("export_structures", _params(name=name)))
+
+
+@mcp.tool()
+def import_names(names: list[dict], module: str = "", ida_image_base: str = "", address_is_ida: bool = False,
+                 prefix: str = "", do_not_save: bool = True) -> str:
+    """Register names (e.g. renamed functions from IDA) as CE symbols so they show up in disassembly and can be used
+    in address expressions. At most 5000 per call.
+
+    Args:
+        names: [{"name": "Player::Update", "rva": "0x1A2B30"}, {"name": "x", "address": "0x7FF6..."}].
+               `rva` needs `module`. With address_is_ida=true an `address` is treated as an IDA address and rebased
+               using ida_image_base into `module`.
+        prefix: Prepended to every name.
+        do_not_save: Keep the symbols out of saved cheat tables (default true).
+    """
+    return format_result(ce_client.send_command("import_names", _params(
+        names=names, module=module, ida_image_base=ida_image_base, address_is_ida=address_is_ida or None,
+        prefix=prefix, do_not_save=do_not_save)))
+
+
+# ---- long-running analysis (background jobs; each waits up to wait_seconds, then returns the job id) ----
+
+@mcp.tool()
+def rtti_scan_module(module: str = "", max_vtable_entries: int = 256, wait_seconds: float = 30.0, limit: int = 200, offset: int = 0) -> str:
+    """Find every MSVC RTTI class in a module: class name (demangled + raw), vtable address/RVA, number of virtual
+    functions, this-pointer offset (non-zero = secondary base vtable) and the base-class chain. x64 and x86.
+    Results are cached so export_names can emit them for IDA.
+
+    Runs as a background job. Returns the classes when finished within `wait_seconds`; otherwise returns
+    {state:"running", job_id, progress} - call wait_for_job / get_job_result later.
+    """
+    return format_result(_run_job("rtti_scan", _params(module=module, max_vtable_entries=max_vtable_entries), wait_seconds, limit, offset))
+
+
+@mcp.tool()
+def find_string_refs(text: str = "", address: str = "", module: str = "", wide: bool = False, match: str = "start",
+                     include_data: bool = True, wait_seconds: float = 30.0, limit: int = 100) -> str:
+    """Find the code and data that reference a string.
+
+    Give `text` (looked up in the module's data sections; wide=true for UTF-16) or the string's `address`.
+    `match`: "start" (default, the text must begin a string) or "any" (also mid-string hits).
+    Finds x64 rip-relative `lea reg,[rip+disp]` (how compilers load string addresses), absolute pointers in code
+    (x86 push/mov imm32) and, with include_data, absolute pointers stored in data sections.
+    Each reference has kind (rip_lea | abs_code | abs_data), address, module+RVA expression, section and disassembly.
+    Background job; see rtti_scan_module for the wait/timeout behaviour.
+    """
+    return format_result(_run_job("find_string_refs", _params(
+        text=text, address=address, module=module, wide=wide or None, match=match, include_data=include_data), wait_seconds, limit))
+
+
+@mcp.tool()
+def find_code_caves(module: str = "", byte: int = 204, min_size: int = 16, sections: str = "exec", wait_seconds: float = 30.0, limit: int = 100) -> str:
+    """Find runs of padding bytes (default 0xCC; also 0x00 or 0x90) of at least `min_size` bytes where you can place
+    patches or hooks. `sections`: "exec" (executable sections only, default) or "all". Largest first.
+    Background job; see rtti_scan_module for the wait/timeout behaviour."""
+    return format_result(_run_job("find_code_caves", _params(module=module, byte=byte, min_size=min_size, sections=sections), wait_seconds, limit))
+
+
+@mcp.tool()
+def find_pointer_path(address: str, max_depth: int = 3, max_offset: int = 1024, max_per_level: int = 16,
+                      max_results: int = 100, protection: str = "+W", wait_seconds: float = 30.0, limit: int = 100) -> str:
+    """Find static pointer chains that lead to `address` (a heap/stack value that moves between runs).
+
+    Works backwards: each level runs one memory scan for pointers whose value lies within `max_offset` below the
+    address, keeps the best `max_per_level` non-static holders and repeats, up to `max_depth` levels, until a holder
+    lies inside a module (that module+RVA is the static base). Every chain is re-resolved to verify it reaches the
+    address. Each result has `base` ("module+0xRVA"), `offsets` (outermost first), `expression`
+    ("[[game.exe+0x1234]+0x40]+0x100") and `verified`.
+
+    This is a plain reverse scan, far less thorough than Cheat Engine's pointer scanner; expect a handful of chains,
+    each costing one full memory scan per frontier address (seconds to minutes in big processes). Re-check the
+    chains after restarting the target with validate_pointer_chains. Background job; see rtti_scan_module for the
+    wait/timeout behaviour, and use cancel_job to stop it.
+    """
+    return format_result(_run_job("find_pointer_path", _params(
+        address=address, max_depth=max_depth, max_offset=max_offset, max_per_level=max_per_level,
+        max_results=max_results, protection=protection), wait_seconds, limit))
+
+
+# ---- snapshots ----------------------------------------------------------------------------------------
+
+@mcp.tool()
+def snapshot_region(address: str = "", size: int = 0, name: str = "", module: str = "", section: str = "") -> str:
+    """Save a copy of a memory region (max 64 MB each, 128 MB / 16 snapshots in total) so you can later diff it:
+    take one, change something in the game, take another, then diff_snapshots to see which values changed - without
+    running a first scan over the whole process. Give address+size, or module+section (e.g. module="game.exe",
+    section=".data"). Unreadable pages are zero-filled and reported in `unreadable_bytes`. Re-using a name replaces it."""
+    return format_result(ce_client.send_command("snapshot_region", _params(address=address, size=size or None, name=name, module=module, section=section)))
+
+
+@mcp.tool()
+def list_snapshots() -> str:
+    """List saved snapshots (name, address, size, unreadable bytes) and the memory they use."""
+    return format_result(ce_client.send_command("list_snapshots"))
+
+
+@mcp.tool()
+def delete_snapshot(name: str = "", all: bool = False) -> str:
+    """Delete one snapshot by name, or all of them with all=true."""
+    return format_result(ce_client.send_command("delete_snapshot", _params(name=name, all=all or None)))
+
+
+@mcp.tool()
+def diff_snapshots(snapshots: list[str], pattern: str = "", unit: int = 4, offset: int = 0, length: int = 0,
+                   merge_gap: int = 0, limit: int = 200) -> str:
+    """Compare 2+ snapshots of the same region ("live" may be used for the current memory) and list the units that
+    behave as expected - the 'unknown value' workflow without scans.
+
+    Args:
+        snapshots: Names in time order, e.g. ["before", "after_hit", "after_heal"].
+        pattern: One character per consecutive pair: C = must have changed, U = must be unchanged, ? = don't care.
+                 Default: all C. ["a","b","c"] with "CU" = changed between a and b, then stable (b == c).
+        unit: Compare in 1, 2, 4 (default) or 8 byte units; 4 also shows float views, 8 double views.
+        offset, length: Restrict to a sub-range of the region (bytes).
+        merge_gap: Adjacent matches closer than this many bytes are merged in `groups` (default = unit).
+        limit: Max matches returned (total_matches always counts all).
+
+    Returns total_matches, matches[{address, offset, old, new, values?, old_float/new_float...}] and
+    groups[{address, offset, size, units}] that point to likely fields.
+    """
+    return format_result(ce_client.send_command("diff_snapshots", _params(
+        snapshots=snapshots, pattern=pattern, unit=unit, offset=offset or None, length=length or None,
+        merge_gap=merge_gap or None, limit=limit)))
+
+# >>> END UNIT-26 <<<
 
 if __name__ == "__main__":
     try:

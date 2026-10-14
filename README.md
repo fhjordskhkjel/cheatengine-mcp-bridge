@@ -287,6 +287,20 @@ And many more at `AI_Context/MCP_Bridge_Command_Reference.md`
 
 `read_memory` now takes `format` (`hex` default, `base64`, `array`, `both`); `hex` roughly halves the output of the old default.
 
+### Analysis, PE & IDA Exchange
+| Tool | Description |
+|------|-------------|
+| `pe_info`, `pe_imports`, `pe_exports`, `pe_tls_callbacks` | Parse a loaded module's PE headers from memory: sections (rwx), imports with the live IAT values (spot hooks), exports with forwarders, TLS callbacks |
+| `rtti_scan_module` | Every MSVC RTTI class in a module: vtable address/RVA, virtual function count, base-class chain (x64 and x86) |
+| `find_string_refs` | Code (`lea reg,[rip+x]`, absolute operands) and data that reference a string |
+| `find_code_caves` | Runs of `0xCC`/`0x00`/`0x90` padding for patches and hooks |
+| `find_pointer_path` | Reverse pointer search: static `[[module+rva]+o1]+o2` chains that reach a heap address, verified by re-resolving |
+| `snapshot_region`, `diff_snapshots`, `list_snapshots`, `delete_snapshot` | Save memory copies and diff them (`C`hanged / `U`nchanged pattern per pair) for unknown-value hunting without scans |
+| `va_to_rva`, `rva_to_va`, `rebase_address` | Translate between runtime addresses, module+RVA and IDA addresses |
+| `export_names`, `export_structures`, `import_names` | Send CE symbols, RTTI vtables and structure definitions to IDA (JSON, an IDAPython script, C declarations) and bring IDA names back as CE symbols |
+
+The long-running ones (`rtti_scan_module`, `find_string_refs`, `find_code_caves`, `find_pointer_path`) run as background jobs: they wait up to `wait_seconds` and otherwise return a `job_id` for `wait_for_job` / `get_job_result`.
+
 ## Critical Configuration
 
 ### BSOD Prevention

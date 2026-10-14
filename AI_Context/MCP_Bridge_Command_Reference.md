@@ -3412,6 +3412,39 @@ Health/diagnostics. No parameters. Returns `version`, `pipe`, `uptime_seconds`, 
 
 ---
 
+## 34. Analysis, PE & IDA Exchange (Unit 26)
+
+All commands below that take `module` accept a module name (case-insensitive; exact match first, then substring) or an address inside the module; empty means the main module (the first one CE lists).
+
+### PE parsing
+| Command | Parameters | Returns |
+|---------|-----------|---------|
+| `pe_info` | `module` | `arch`, `entry_point(_rva)`, `preferred_image_base`, `relocated`, `size_of_image`, `subsystem`, `sections[{name,rva,virtual_size,raw_size,flags,address}]` (`flags` = `r`/`w`/`x`), `data_directories[]` |
+| `pe_imports` | `module`, `dll`, `offset`, `limit` | `dlls[{name,count}]`, `imports[{dll,name\|ordinal,hint,iat_rva,iat_address,resolved,resolved_module}]`. `resolved` is what the IAT holds right now, so a value outside the expected DLL reveals a hook |
+| `pe_exports` | `module`, `name_contains`, `offset`, `limit` | `exports[{name,ordinal,rva,rva_hex,address,forwarder?}]` |
+| `pe_tls_callbacks` | `module` | `callbacks[{address,rva,section,module}]` plus the TLS directory fields |
+
+### Address translation
+`va_to_rva` (`address` or `addresses`, optional `ida_image_base`, `include_section`) returns `module`, `rva`, `section`, `expression` (`module+0xRVA`) and `ida_address`. `rva_to_va` (`module`, `rva`/`rvas`, optional `ida_image_base`) is the inverse. `rebase_address` (`address(es)`, `from_base`|`from_module`, `to_base`|`to_module`) moves addresses between two images loaded at different bases.
+
+### Exchanging names with IDA
+`export_names` (`module`, `sources` = `symbols` and/or `rtti`, `format` = `json`|`idapython`, `ida_image_base`, `include_types`) returns the entries (`rva`, `name`, `ida_name`, `kind`), an IDAPython `script` that applies them relative to the loaded image base, and `c_declarations` (vtable/class skeletons from RTTI). RTTI names come from the last `rtti_scan` of that module. `export_structures` (`name`) writes C declarations for CE structure definitions with explicit padding. `import_names` (`names[{name, rva|address}]`, `module`, `prefix`, `address_is_ida`, `ida_image_base`, `do_not_save`) registers names as CE symbols (max 5000 per call).
+
+### Background analysis jobs (`start_job` kinds)
+| Kind | Parameters | Result |
+|------|-----------|--------|
+| `rtti_scan` | `module`, `max_vtable_entries` | `classes[{class_name,raw_name,kind,vtable,vtable_rva,col,this_offset,vfunc_count,bases[]}]`. MSVC RTTI only. Three passes over the non-executable sections: type descriptors, complete object locators, vtables. A non-zero `this_offset` marks a secondary base's vtable |
+| `find_string_refs` | `text`\|`address`, `module`, `wide`, `match` (`start`\|`any`), `include_data` | `string_addresses[]`, `references[{address,kind,target,rva,section,instruction}]`; kinds `rip_lea` (x64 `lea reg,[rip+disp]`), `abs_code`, `abs_data` |
+| `find_code_caves` | `module`, `byte` (`0xCC`\|`0x00`\|`0x90`), `min_size`, `sections` (`exec`\|`all`) | `caves[{address,size,rva,section}]`, largest first |
+| `find_pointer_path` | `address`, `max_depth` (1-6), `max_offset`, `max_per_level`, `max_results`, `protection` | `chains[{base,offsets,offsets_hex,expression,depth,verified}]`. One value-between memscan per frontier address per level; non-static holders are expanded best-first (smallest accumulated offsets) up to `max_per_level`. `offsets` are outermost first: `base` -> read -> `+offsets[0]` -> read -> ... -> `+offsets[last]` = the address. Re-check chains after a restart with `validate_pointer_chains` |
+
+The MCP tools `rtti_scan_module`, `find_string_refs`, `find_code_caves` and `find_pointer_path` wrap `start_job` + wait + `get_job_result`.
+
+### Snapshots
+`snapshot_region` (`address`+`size`, or `module`+`section`; `name`) stores a copy (64 MB each, 128 MB and 16 snapshots in total; unreadable pages are zero-filled and counted in `unreadable_bytes`). `diff_snapshots` (`snapshots` in time order, `"live"` allowed; `pattern` with one `C`/`U`/`?` per consecutive pair; `unit` 1/2/4/8; `offset`/`length`; `merge_gap`; `limit`) returns `total_matches`, `matches[]` (`old`/`new`, `values` for 3+ snapshots, float views for unit 4 and double views for unit 8) and `groups[]` of merged runs that point at likely fields. Blocks that were unreadable in any snapshot are skipped (`skipped_unreadable_blocks`). `list_snapshots`, `delete_snapshot` (`name` or `all`).
+
+---
+
 ## Best Practices
 
 1. **Always call `ping` first** to verify connectivity before performing operations.
