@@ -53,7 +53,8 @@ _g("scan", READ, "scan_all next_scan get_scan_results aob_scan pattern_scan aob_
 _g("analysis", READ, "disassemble get_instruction_info find_function_boundaries analyze_function find_references find_call_references "
                      "dissect_structure get_rtti_classname pe_info pe_imports pe_exports pe_tls_callbacks va_to_rva rva_to_va rebase_address "
                      "export_names export_structures rtti_scan_module find_string_refs find_xrefs find_code_caves find_pointer_path "
-                     "snapshot_region list_snapshots delete_snapshot diff_snapshots pe_functions recover_struct")
+                     "snapshot_region list_snapshots delete_snapshot diff_snapshots pe_functions recover_struct "
+                     "compare_pointer_paths list_pointer_sets get_pointer_set drop_pointer_set")
 
 # ---- symbols
 _g("symbols", READ, "get_symbol_address get_address_info get_symbol_info enum_registered_symbols")

@@ -185,21 +185,42 @@ check("find_xrefs: paging goes to get_job_result", out.get("echo_offset") == 40 
 mod.find_xrefs("0x3000", size=32, module="all", kinds="call,rip", max_results=100, wait_seconds=3)
 check("find_xrefs: size/module/kinds/max_results forwarded", params_seen["start_job"] == {"kind": "find_xrefs", "params": {
     "address": "0x3000", "size": 32, "module": "all", "kinds": "call,rip", "max_results": 100}}, params_seen["start_job"])
+mod.find_pointer_path("0x2A000100", save_as="hp", wait_seconds=0.3)
+check("find_pointer_path: save_as forwarded", params_seen["start_job"]["params"].get("save_as") == "hp", params_seen["start_job"])
+
+# ---- pointer path sets (two-run comparison)
+mod.compare_pointer_paths("0x1F000100", name="hp")
+check("compare_pointer_paths: defaults send only target, name and limit", params_seen["compare_pointer_paths"] == {"target": "0x1F000100", "name": "hp", "limit": 100}, params_seen["compare_pointer_paths"])
+mod.compare_pointer_paths("0x1F000100", chains=[{"base": "game.exe+0x10", "offsets": [64]}], save_as="x", near_delta=64, near_limit=3, offset=5, limit=10)
+check("compare_pointer_paths: everything forwarded", params_seen["compare_pointer_paths"] == {
+    "target": "0x1F000100", "chains": [{"base": "game.exe+0x10", "offsets": [64]}], "save_as": "x", "near_delta": 64, "near_limit": 3, "offset": 5, "limit": 10}, params_seen["compare_pointer_paths"])
+mod.list_pointer_sets()
+check("list_pointer_sets calls the bridge", calls[-1] == "list_pointer_sets")
+mod.get_pointer_set("hp", offset=2, limit=5)
+check("get_pointer_set params", params_seen["get_pointer_set"] == {"name": "hp", "offset": 2, "limit": 5}, params_seen["get_pointer_set"])
+mod.drop_pointer_set(name="hp")
+check("drop_pointer_set by name", params_seen["drop_pointer_set"] == {"name": "hp"}, params_seen["drop_pointer_set"])
+mod.drop_pointer_set(all=True)
+check("drop_pointer_set all", params_seen["drop_pointer_set"] == {"all": True}, params_seen["drop_pointer_set"])
 
 # ---- retry policy table for the new bridge methods
 for m, want in [("pe_info", True), ("get_halted_state", True), ("pe_functions", True), ("pe_imports", True), ("pe_exports", True), ("pe_tls_callbacks", True), ("va_to_rva", True),
                 ("rva_to_va", True), ("rebase_address", True), ("export_names", True), ("export_structures", True), ("diff_snapshots", True),
-                ("snapshot_region", True), ("list_snapshots", True), ("delete_snapshot", True), ("import_names", False), ("start_job", False)]:
+                ("snapshot_region", True), ("list_snapshots", True), ("delete_snapshot", True), ("import_names", False), ("start_job", False),
+                ("list_pointer_sets", True), ("get_pointer_set", True), ("compare_pointer_paths", False), ("drop_pointer_set", False)]:
     check("is_idempotent(%s)==%s" % (m, want), mod.is_idempotent(m) == want)
 
 # ---- MCP registration / schemas
 tools = {tool.name: tool for tool in mod.mcp._tool_manager.list_tools()}
 need = ["pe_info", "get_halted_state", "pe_functions", "recover_struct", "pe_imports", "pe_exports", "pe_tls_callbacks", "va_to_rva", "rva_to_va", "rebase_address", "export_names", "export_structures",
         "import_names", "rtti_scan_module", "find_string_refs", "find_xrefs", "find_code_caves", "find_pointer_path", "snapshot_region", "list_snapshots",
-        "delete_snapshot", "diff_snapshots"]
+        "delete_snapshot", "diff_snapshots", "compare_pointer_paths", "list_pointer_sets", "get_pointer_set", "drop_pointer_set"]
 check("all new tools registered with MCP", all(n in tools for n in need), [n for n in need if n not in tools])
 check("diff_snapshots schema", tools["diff_snapshots"].parameters["properties"]["snapshots"]["type"] == "array", tools["diff_snapshots"].parameters)
 check("find_xrefs requires address", tools["find_xrefs"].parameters.get("required") == ["address"], tools["find_xrefs"].parameters.get("required"))
+check("compare_pointer_paths requires only target", tools["compare_pointer_paths"].parameters.get("required") == ["target"], tools["compare_pointer_paths"].parameters.get("required"))
+check("compare_pointer_paths chains schema is a list", tools["compare_pointer_paths"].parameters["properties"]["chains"].get("anyOf") is not None
+      or tools["compare_pointer_paths"].parameters["properties"]["chains"].get("type") == "array", tools["compare_pointer_paths"].parameters["properties"]["chains"])
 check("find_pointer_path requires address", tools["find_pointer_path"].parameters.get("required") == ["address"], tools["find_pointer_path"].parameters.get("required"))
 
 stop = True

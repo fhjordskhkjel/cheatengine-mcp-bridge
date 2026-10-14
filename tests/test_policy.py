@@ -34,10 +34,15 @@ tools = m.mcp._tool_manager.list_tools()
 out = {"names": sorted(t.name for t in tools),
        "schema_bytes": sum(len(t.description or "") + len(json.dumps(t.parameters)) for t in tools)}
 c = m.ce_client
-out["write"] = c.send_command("write_memory", {"address": "0x1", "bytes": [1]})
-out["lua"] = c.send_command("evaluate_lua", {"code": "return 1"})
-out["batch_bad"] = c.send_command("batch", {"requests": [{"method": "read_memory", "params": {}}, {"method": "write_memory", "params": {}}]})
-out["job_bad"] = c.send_command("start_job", {"kind": "evaluate_lua", "params": {}})
+def probe(method, params):
+    # only calls the policy refuses go through send_command: an allowed one would reach a live bridge (or fail when CE is closed)
+    if m.POLICY.check(method, params) is None:
+        return {"success": True, "not_sent": True}
+    return c.send_command(method, params)
+out["write"] = probe("write_memory", {"address": "0x1", "bytes": [1]})
+out["lua"] = probe("evaluate_lua", {"code": "return 1"})
+out["batch_bad"] = probe("batch", {"requests": [{"method": "read_memory", "params": {}}, {"method": "write_memory", "params": {}}]})
+out["job_bad"] = probe("start_job", {"kind": "evaluate_lua", "params": {}})
 out["allowed"] = {"read": m.POLICY.check("read_memory", {}) is None, "bp": m.POLICY.check("set_breakpoint", {}) is None,
                   "write": m.POLICY.check("write_memory", {}) is None, "lua": m.POLICY.check("evaluate_lua", {}) is None,
                   "batch_read": m.POLICY.check("batch", {"requests": [{"method": "read_memory", "params": {}}]}) is None,

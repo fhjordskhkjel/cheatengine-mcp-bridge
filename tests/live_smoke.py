@@ -140,18 +140,30 @@ def spawn_target():
     return info
 
 
+target2 = None
+
+
+def spawn_second():
+    """A second, 'restarted' instance of the throwaway target (its second pointer root is broken)."""
+    global target2
+    target2 = subprocess.Popen([sys.executable, str(Path(__file__).with_name("live_target.py"))], stdout=subprocess.PIPE, text=True,
+                               env=dict(os.environ, LIVE_TARGET_VARIANT="2"), creationflags=subprocess.CREATE_NO_WINDOW)
+    return json.loads(target2.stdout.readline())
+
+
 def teardown():
     for fn, args in ((m.clear_all_breakpoints, ()), (m.debug_detach, ())):
         try:
             fn(*args)
         except Exception:
             pass
-    if target is not None:
-        try:
-            target.kill()
-            target.wait(timeout=5)
-        except Exception:
-            pass
+    for proc in (target, target2):
+        if proc is not None:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
     if orig_pid:
         r = call(m.open_process, str(orig_pid))
         print("\nrestored CE's original process %s: %s" % (orig_pid, "ok" if r.get("success") else r))
@@ -321,6 +333,39 @@ def main():
         pp = call(m.find_pointer_path, hx(obj), max_depth=2, max_offset=256, wait_seconds=60)
         check("find_pointer_path runs to completion (value-between memscans)", pp.get("success") and pp.get("scans", 0) >= 1, pp.get("error") or pp)
         note("find_pointer_path: %s chain(s), %s scans" % (pp.get("found"), pp.get("scans")))
+
+    if section("pointer sets"):
+        # The two-run comparison across a REAL restart: the throwaway target keeps two root pointers on a page at a fixed
+        # address; a second instance has a different heap (the counter moves) and one broken root.
+        fixed = info.get("fixed")
+        if not fixed:
+            skip("pointer sets", "the target could not reserve its fixed root page")
+        else:
+            chain_a, chain_b = {"base": hx(fixed + 0x20), "offsets": [16]}, {"base": hx(fixed + 0x28), "offsets": [16]}
+            call(m.drop_pointer_set, all=True)
+            r1 = call(m.compare_pointer_paths, hx(counter), chains=[chain_a, chain_b], save_as="smoke_ps")
+            check("run 1: both roots reach the counter and are stored", r1.get("success") and r1.get("hits") == 2 and r1.get("saved_as") == "smoke_ps"
+                  and r1.get("set", {}).get("runs") == 1, r1)
+            info2 = spawn_second()
+            check("the second instance has its own pid and counter", info2["pid"] != info["pid"] and info2["counter"] != counter and info2.get("fixed") == fixed,
+                  (info, info2))
+            att2 = call(m.open_process, str(info2["pid"]))
+            check("CE attaches to the second instance", att2.get("success") is True and call(m.get_opened_process_id).get("process_id") == info2["pid"], att2)
+            r2 = call(m.compare_pointer_paths, hx(info2["counter"]), name="smoke_ps", save_as="smoke_ps")
+            check("run 2: only the intact root survives", r2.get("success") and r2.get("hits") == 1 and r2.get("missed") == 1 and r2["chains"][0]["base"] == hx(fixed + 0x20), r2)
+            check("run 2: it is a new process instance and the chain is confirmed twice", r2.get("same_process") is False and r2.get("run") == 2
+                  and r2["chains"][0]["runs"] == 2 and r2.get("set", {}).get("runs") == 2, r2)
+            check("run 2: the broken root is not a near miss (it points at another object)", r2.get("near_misses") is None, r2.get("near_misses"))
+            oracle = call(m.validate_pointer_chains, [chain_a, chain_b], hx(info2["counter"]))
+            check("an independent resolver (validate_pointer_chains) agrees", oracle.get("matched") == 1 and oracle["matches"][0]["offsets"] == [16], oracle)
+            again = call(m.compare_pointer_paths, hx(info2["counter"]), name="smoke_ps")
+            check("asking again in the same process is flagged", again.get("same_process") is True and again.get("hits") == 1, again)
+            got = call(m.get_pointer_set, "smoke_ps")
+            check("get_pointer_set shows the narrowed set and both runs", got.get("success") and got.get("total") == 1 and len(got.get("history", [])) == 2
+                  and got["history"][1]["pid"] == info2["pid"], got)
+            check("drop_pointer_set", call(m.drop_pointer_set, name="smoke_ps").get("deleted") == 1)
+            call(m.open_process, str(info["pid"]))                       # back to the main throwaway target for the other sections
+            target2.kill()
 
     if section("breakpoints"):
         call(m.clear_all_breakpoints)

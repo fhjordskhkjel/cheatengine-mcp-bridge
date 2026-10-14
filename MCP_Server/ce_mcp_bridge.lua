@@ -7995,6 +7995,10 @@ JOB_STARTERS.find_pointer_path = function(job, p)
     local perScan = clampInt(p.max_results_per_scan or 2000, 10, 50000)
     local maxFound = clampInt(p.max_results or 100, 1, 1000)
     local protect = p.protection or "+W"
+    if p.save_as ~= nil then
+        local _, nerr = U26.psName(p.save_as)             -- fail now, not after minutes of scanning
+        if nerr then return nerr end
+    end
     local mods = U26.listModules()
     local st = { frontier = { { t = target, offs = {} } }, qi = 1, depth = 1, nextc = {}, found = {}, scans = 0, truncated = false, seen = {} }
     local onScan
@@ -8013,25 +8017,35 @@ JOB_STARTERS.find_pointer_path = function(job, p)
             if #a.offs ~= #b.offs then return #a.offs < #b.offs end
             return a.cost < b.cost
         end)
-        local items = {}
+        local items, keep = {}, {}
         for i, f in ipairs(st.found) do
             if i > maxFound then break end
             local baseStr = f.module .. "+" .. U26.hex(f.rva)
             local chain = resolveChain(f.base, f.offs)
             local hexOffs = {}
             for k, o in ipairs(f.offs) do hexOffs[k] = U26.hex(o) end
+            local verified = (chain.ok == true and chain.final_address == target)
             items[#items + 1] = {
                 base = baseStr, base_address = U26.hex(f.base), offsets = f.offs, offsets_hex = hexOffs,
                 depth = #f.offs, expression = chainExpression(baseStr, f.offs),
-                verified = (chain.ok == true and chain.final_address == target),
+                verified = verified,
             }
+            if verified then keep[#keep + 1] = { module = f.module, rva = f.rva, offsets = f.offs, runs = 1 } end
         end
         j.progress = { current = st.scans, total = math.max(st.scans, 1) }
-        jobFinish(j, "done", { result = {
-            fields = { target = U26.hex(target), arch = is64 and "x64" or "x86", max_depth = maxDepth, max_offset = maxOffset,
-                       scans = st.scans, truncated = st.truncated, found = #items,
-                       hint = "Re-check after a restart with validate_pointer_chains(chains=<these {base,offsets}>, target=<new address>)." },
-            list_key = "chains", items = items } })
+        local fields = { target = U26.hex(target), arch = is64 and "x64" or "x86", max_depth = maxDepth, max_offset = maxOffset,
+                         scans = st.scans, truncated = st.truncated, found = #items,
+                         hint = "After the target restarts, find the same value again and run compare_pointer_paths(name=<set>, target=<new address>); " ..
+                                "pass save_as here to keep these chains in a set. (validate_pointer_chains takes the chains inline.)" }
+        if p.save_as ~= nil then
+            local s, why = U26.psSaveFound(p.save_as, keep, target)
+            if s then
+                fields.saved_as, fields.set = s.name, U26.psSummary(s)
+            else
+                fields.save_note = "not saved: " .. why
+            end
+        end
+        jobFinish(j, "done", { result = { fields = fields, list_key = "chains", items = items } })
         return true
     end
 
@@ -9290,6 +9304,340 @@ JOB_KIND_NAMES = JOB_KIND_NAMES .. ", find_xrefs"
 
 -- >>> END UNIT-28 <<<
 
+-- >>> BEGIN UNIT-30 Pointer path sets: comparing pointer chains across runs <<<
+-- A pointer chain found in one run is only worth something if it still works after the target restarts. A "set" is a
+-- named list of chains {module+RVA, offsets} kept inside the bridge, so it outlives target restarts (not a reload of the
+-- bridge). find_pointer_path(save_as=) fills one in run 1; after the restart compare_pointer_paths re-resolves every
+-- chain against the new address of the same value and keeps those that land on it. Saving the survivors back narrows
+-- the set: a chain with runs=3 has reached its value in three separate runs.
+U26.PS_MAX_SETS, U26.PS_MAX_CHAINS, U26.PS_MAX_DEPTH, U26.PS_MAX_HISTORY = 16, 5000, 16, 20
+serverState.path_sets = {}
+
+function U26.psName(v)
+    if type(v) == "string" and #v <= 48 and v:match("^[%w_%.%-]+$") then return v end
+    return nil, U26.err("Set names use letters, digits, '_', '.' and '-' (at most 48 characters)")
+end
+
+function U26.psCount()
+    local n = 0
+    for _ in pairs(serverState.path_sets) do n = n + 1 end
+    return n
+end
+
+function U26.psInt(v)
+    if type(v) == "string" then v = tonumber(v) end
+    if math.type(v) == "float" then return math.tointeger(v) end
+    if math.type(v) == "integer" then return v end
+    return nil
+end
+
+function U26.psProcess()
+    local ok, name = pcall(function() return process end)
+    return { pid = getOpenedProcessID(), process = (ok and type(name) == "string") and name or nil }
+end
+
+function U26.psSigned(n) return n < 0 and "-" .. U26.hex(-n) or U26.hex(n) end
+
+-- One chain as a client sends it ({base = "module+0xRVA" | address, offsets = {...}, runs = n}) -> stored record.
+-- An address inside a loaded module is stored module-relative: that is the part that survives a restart.
+function U26.psParseChain(c, mods)
+    if type(c) ~= "table" then return nil, "not an object with base and offsets" end
+    local raw = c.offsets
+    if raw == nil then raw = {} end
+    if type(raw) ~= "table" or #raw > U26.PS_MAX_DEPTH then
+        return nil, "offsets must be a list of at most " .. U26.PS_MAX_DEPTH .. " integers"
+    end
+    local offs = {}
+    for i, o in ipairs(raw) do
+        local n = U26.psInt(o)
+        if not n then return nil, "offsets[" .. i .. "] is not an integer" end
+        offs[i] = n
+    end
+    local rec = { offsets = offs, runs = U26.psInt(c.runs) or 0 }
+    local base = c.base
+    if type(base) == "string" then
+        local name, tail = base:match("^(.+)%+(%w+)$")
+        local rva = tail and (tail:match("^0[xX]%x+$") and tonumber(tail) or (tail:match("^%x+$") and tonumber(tail, 16)))
+        if name and rva then
+            local lname = name:lower()
+            for _, m in ipairs(mods) do        -- the loaded module's own spelling, so "GAME.EXE+10" and "game.exe+10" are one chain
+                if m.name:lower() == lname then name = m.name; break end
+            end
+            rec.module, rec.rva = name, rva
+            return rec
+        end
+        base = U26.addr(base)
+    end
+    base = U26.psInt(base)
+    if not base then return nil, "base must be 'module+0xRVA' or an address" end
+    local m = U26.moduleFor(mods, base)
+    if m then rec.module, rec.rva = m.name, base - m.base else rec.abs = base end
+    return rec
+end
+
+function U26.psBaseString(r)
+    if r.module then return r.module .. "+" .. U26.hex(r.rva) end
+    return U26.hex(r.abs)
+end
+
+-- CE-style expression: [[base]+o1]+o2 (a chain without offsets is just the base)
+function U26.psExpression(r)
+    if #r.offsets == 0 then return U26.psBaseString(r) end
+    local expr = "[" .. U26.psBaseString(r) .. "]"
+    for i, o in ipairs(r.offsets) do
+        expr = expr .. (o < 0 and "-" .. U26.hex(-o) or "+" .. U26.hex(o))
+        if i < #r.offsets then expr = "[" .. expr .. "]" end
+    end
+    return expr
+end
+
+function U26.psView(r)
+    local hexOffs = {}
+    for i, o in ipairs(r.offsets) do hexOffs[i] = U26.psSigned(o) end
+    return { base = U26.psBaseString(r), offsets = r.offsets, offsets_hex = hexOffs, depth = #r.offsets,
+             expression = U26.psExpression(r), runs = r.runs }
+end
+
+function U26.psCost(r)
+    local c = 0
+    for _, o in ipairs(r.offsets) do c = c + math.abs(o) end
+    return c
+end
+
+function U26.psSummary(s)
+    return { name = s.name, chain_count = #s.chains, runs = s.runs, arch = s.arch, created = s.created, updated = s.updated,
+             history = s.history }
+end
+
+-- Follow one chain in the CURRENT process: "ok", finalAddress | "module_missing" | "unreadable"
+function U26.psEval(rec, byName, is64)
+    local cur = rec.abs
+    if rec.module then
+        local m = byName[rec.module:lower()]
+        if not m then return "module_missing" end
+        cur = m.base + rec.rva
+    end
+    for _, off in ipairs(rec.offsets) do
+        local ptr = U26.ptr(cur, is64)
+        if not ptr then return "unreadable" end
+        cur = ptr + off
+        if not is64 then cur = cur & 0xFFFFFFFF end
+    end
+    return "ok", cur
+end
+
+-- Store (replace) a set. Returns the set, or nil + reason. Never stores an empty set.
+function U26.psPut(name, chains, runs, history)
+    local n, nerr = U26.psName(name)
+    if not n then return nil, nerr.error end
+    if #chains == 0 then return nil, "nothing to store (an existing set is never overwritten with an empty one)" end
+    if #chains > U26.PS_MAX_CHAINS then return nil, "a set holds at most " .. U26.PS_MAX_CHAINS .. " chains" end
+    local old = serverState.path_sets[name]
+    if not old and U26.psCount() >= U26.PS_MAX_SETS then
+        return nil, "at most " .. U26.PS_MAX_SETS .. " sets are kept; drop_pointer_set one first"
+    end
+    while #history > U26.PS_MAX_HISTORY do table.remove(history, 1) end
+    local now = os.time()
+    local s = { name = name, chains = chains, runs = runs, history = history, created = old and old.created or now, updated = now,
+                arch = targetIs64Bit() and "x64" or "x86" }
+    serverState.path_sets[name] = s
+    return s
+end
+
+-- find_pointer_path(save_as=): run 1 of a comparison
+function U26.psSaveFound(name, recs, target)
+    local pr = U26.psProcess()
+    return U26.psPut(name, recs, 1, { { run = 1, at = os.time(), pid = pr.pid, process = pr.process, target = U26.hex(target),
+                                         tested = #recs, survivors = #recs, source = "find_pointer_path" } })
+end
+
+-- Re-resolve every chain of a stored set (name) or an inline list (chains) against the address of the same value in
+-- the process as it is NOW (target). Chains that land exactly on it have been confirmed in one more run.
+function cmd_compare_pointer_paths(params)
+    local perr = requireProcess()
+    if perr then return perr end
+    local target = U26.addr(params.target)
+    if not target then return U26.err("Invalid target address", "INVALID_ADDRESS") end
+    if (params.name == nil) == (params.chains == nil) then
+        return U26.err("Give exactly one of name (a stored set) or chains (a list of {base, offsets})")
+    end
+    local saveAs = params.save_as
+    if saveAs ~= nil then
+        local _, nerr = U26.psName(saveAs)
+        if nerr then return nerr end
+    end
+    local nearDelta = clampInt(params.near_delta or 0x100, 0, 0x10000)
+    local nearLimit = clampInt(params.near_limit or 10, 0, 100)
+
+    local mods = U26.listModules()
+    local src, input, duplicates = nil, {}, 0
+    if params.name ~= nil then
+        src = serverState.path_sets[params.name]
+        if not src then return U26.err("No such pointer set: " .. tostring(params.name) .. " (list_pointer_sets shows them)", "NOT_FOUND") end
+        input = src.chains
+    else
+        if type(params.chains) ~= "table" or #params.chains == 0 then return U26.err("chains must be a non-empty list") end
+        if #params.chains > U26.PS_MAX_CHAINS then
+            return U26.err("Too many chains (max " .. U26.PS_MAX_CHAINS .. "); compare them in pages")
+        end
+        local seenKey = {}
+        for i, c in ipairs(params.chains) do
+            local rec, why = U26.psParseChain(c, mods)
+            if not rec then return U26.err("chains[" .. i .. "]: " .. why) end
+            local key = U26.psExpression(rec)          -- the same chain written another way counts once
+            if seenKey[key] then
+                duplicates = duplicates + 1
+            else
+                seenKey[key] = true
+                input[#input + 1] = rec
+            end
+        end
+    end
+
+    local is64 = targetIs64Bit()
+    local byName = {}
+    for _, m in ipairs(mods) do
+        local k = m.name:lower()
+        if not byName[k] then byName[k] = m end
+    end
+
+    local hits, near = {}, {}
+    local counts = { missed = 0, unreadable = 0, module_missing = 0 }
+    for idx, r in ipairs(input) do
+        local status, final = U26.psEval(r, byName, is64)
+        if status == "ok" and final == target then
+            hits[#hits + 1] = { rec = r, idx = idx }
+        elseif status == "ok" then
+            counts.missed = counts.missed + 1
+            local delta = final - target
+            if nearLimit > 0 and math.abs(delta) <= nearDelta then near[#near + 1] = { rec = r, idx = idx, final = final, delta = delta } end
+        else
+            counts[status] = counts[status] + 1
+        end
+    end
+
+    -- survivors: confirmed in the most runs first, then the shortest and smallest chains
+    local survivors = {}
+    for i, h in ipairs(hits) do
+        local r = h.rec
+        survivors[i] = { module = r.module, rva = r.rva, abs = r.abs, offsets = r.offsets, runs = r.runs + 1, idx = h.idx }
+    end
+    table.sort(survivors, function(a, b)
+        if a.runs ~= b.runs then return a.runs > b.runs end
+        if #a.offsets ~= #b.offsets then return #a.offsets < #b.offsets end
+        local ca, cb = U26.psCost(a), U26.psCost(b)
+        if ca ~= cb then return ca < cb end
+        return a.idx < b.idx
+    end)
+
+    table.sort(near, function(a, b)
+        local da, db = math.abs(a.delta), math.abs(b.delta)
+        if da ~= db then return da < db end
+        return a.idx < b.idx
+    end)
+    local nearOut = {}
+    for i = 1, math.min(#near, nearLimit) do
+        local n = near[i]
+        local v = U26.psView(n.rec)
+        v.final_address = U26.hex(n.final)
+        v.delta = (n.delta >= 0 and "+" or "-") .. U26.hex(math.abs(n.delta))
+        if #n.rec.offsets > 0 then          -- the last field moved by `delta`: the same chain with that offset corrected
+            local fix = {}
+            for k, o in ipairs(n.rec.offsets) do fix[k] = o end
+            fix[#fix] = fix[#fix] - n.delta
+            v.suggested_offsets = fix
+        end
+        nearOut[i] = v
+    end
+
+    local pr = U26.psProcess()
+    local last = src and src.history[#src.history]
+    local runNo = (src and src.runs or 0) + 1
+    local notes = {}
+    local sameProcess = last ~= nil and last.pid ~= nil and last.pid == pr.pid
+    if sameProcess then
+        notes[#notes + 1] = "Same process instance (pid " .. tostring(pr.pid) .. ") as the previous run: the target was not restarted, " ..
+                            "so this only shows that the chains survive whatever happened since (level change, reallocation), not a restart."
+    end
+    if #hits == 0 then
+        notes[#notes + 1] = "No chain reaches " .. U26.hex(target) .. ". Is it the same value in this run? Compare in a fresh state, or search again with find_pointer_path."
+        if #near > 0 then
+            notes[#notes + 1] = #near .. " chain(s) miss by a small distance (near_misses): the last offset probably moved; suggested_offsets shows the corrected chain."
+        end
+    end
+
+    local out = { success = true, target = U26.hex(target), run = runNo, compared = #input, hits = #hits, missed = counts.missed,
+                  unreadable = counts.unreadable, module_missing = counts.module_missing, same_process = sameProcess }
+    if src then out.name = src.name end
+    if duplicates > 0 then out.duplicates_ignored = duplicates end
+
+    if saveAs ~= nil then
+        if #hits == 0 then
+            out.save_note = "not saved: no chain survived, so " .. (serverState.path_sets[saveAs] and "the existing set is unchanged" or "there is nothing to store")
+        else
+            local recs = {}
+            for i, s in ipairs(survivors) do recs[i] = { module = s.module, rva = s.rva, abs = s.abs, offsets = s.offsets, runs = s.runs } end
+            local hist = {}
+            if src then for i, h in ipairs(src.history) do hist[i] = h end end
+            hist[#hist + 1] = { run = runNo, at = os.time(), pid = pr.pid, process = pr.process, target = U26.hex(target),
+                                tested = #input, survivors = #hits, source = src and "compare" or "inline" }
+            local s, why = U26.psPut(saveAs, recs, runNo, hist)
+            if s then
+                out.saved_as, out.set = s.name, U26.psSummary(s)
+            else
+                out.save_note = "not saved: " .. why
+            end
+        end
+    end
+    if #notes > 0 then out.notes = notes end
+    if #nearOut > 0 then out.near_misses = nearOut end
+
+    local limit, offset, page, total = paginate(params, survivors, 100)
+    local views = {}
+    for i, s in ipairs(page) do views[i] = U26.psView(s) end
+    out.total, out.offset, out.limit, out.returned = total, offset, limit, #views
+    out.chains = views
+    return out
+end
+
+function cmd_list_pointer_sets(params)
+    local list = {}
+    for _, s in pairs(serverState.path_sets) do list[#list + 1] = U26.psSummary(s) end
+    table.sort(list, function(a, b)
+        if a.created ~= b.created then return a.created < b.created end
+        return a.name < b.name
+    end)
+    return { success = true, count = #list, sets = list }
+end
+
+function cmd_get_pointer_set(params)
+    local s = serverState.path_sets[params.name]
+    if not s then return U26.err("No such pointer set: " .. tostring(params.name), "NOT_FOUND") end
+    local out = U26.psSummary(s)
+    out.success = true
+    local limit, offset, page, total = paginate(params, s.chains, 100)
+    local views = {}
+    for i, r in ipairs(page) do views[i] = U26.psView(r) end
+    out.total, out.offset, out.limit, out.returned = total, offset, limit, #views
+    out.chains = views
+    return out
+end
+
+function cmd_drop_pointer_set(params)
+    if params.all == true then
+        local n = U26.psCount()
+        serverState.path_sets = {}
+        return { success = true, deleted = n }
+    end
+    if not serverState.path_sets[params.name] then
+        return U26.err("No such pointer set: " .. tostring(params.name), "NOT_FOUND")
+    end
+    serverState.path_sets[params.name] = nil
+    return { success = true, deleted = 1 }
+end
+
+-- >>> END UNIT-30 <<<
+
 local commandHandlers = {
     -- Process & Modules
     get_process_info = cmd_get_process_info,
@@ -9557,6 +9905,13 @@ local commandHandlers = {
     recover_struct      = cmd_recover_struct,
     get_halted_state    = cmd_get_halted_state,
     -- >>> END UNIT-27 <<<
+
+    -- >>> BEGIN UNIT-30 <<<
+    compare_pointer_paths = cmd_compare_pointer_paths,
+    list_pointer_sets   = cmd_list_pointer_sets,
+    get_pointer_set     = cmd_get_pointer_set,
+    drop_pointer_set    = cmd_drop_pointer_set,
+    -- >>> END UNIT-30 <<<
 }
 serverState.dispatch = commandHandlers   -- used by cmd_batch / cmd_bridge_status
 

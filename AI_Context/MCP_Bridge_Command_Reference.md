@@ -3440,7 +3440,7 @@ All commands below that take `module` accept a module name (case-insensitive; ex
 | `find_string_refs` | `text`\|`address`, `module`, `wide`, `match` (`start`\|`any`), `include_data` | `string_addresses[]`, `references[{address,kind,target,rva,section,instruction}]`; kinds `rip_lea` (x64 `lea reg,[rip+disp]`), `abs_code`, `abs_data` |
 | `find_xrefs` | `address`, `size`, `module` (name\|`all`), `kinds`, `max_results` | `references[{kind,address,target,rva,section,instruction,access,function_start}]`, `functions[]`, `by_kind{}`; see section 36 |
 | `find_code_caves` | `module`, `byte` (`0xCC`\|`0x00`\|`0x90`), `min_size`, `sections` (`exec`\|`all`) | `caves[{address,size,rva,section}]`, largest first |
-| `find_pointer_path` | `address`, `max_depth` (1-6), `max_offset`, `max_per_level`, `max_results`, `protection` | `chains[{base,offsets,offsets_hex,expression,depth,verified}]`. One value-between memscan per frontier address per level; non-static holders are expanded best-first (smallest accumulated offsets) up to `max_per_level`. `offsets` are outermost first: `base` -> read -> `+offsets[0]` -> read -> ... -> `+offsets[last]` = the address. Re-check chains after a restart with `validate_pointer_chains` |
+| `find_pointer_path` | `address`, `max_depth` (1-6), `max_offset`, `max_per_level`, `max_results`, `protection`, `save_as` | `chains[{base,offsets,offsets_hex,expression,depth,verified}]`, plus `saved_as` + `set{}` (or `save_note`) when `save_as` names a pointer set (section 38). One value-between memscan per frontier address per level; non-static holders are expanded best-first (smallest accumulated offsets) up to `max_per_level`. `offsets` are outermost first: `base` -> read -> `+offsets[0]` -> read -> ... -> `+offsets[last]` = the address. Re-check chains after a restart with `compare_pointer_paths` (section 38) or `validate_pointer_chains` |
 
 The MCP tools `rtti_scan_module`, `find_string_refs`, `find_code_caves` and `find_pointer_path` wrap `start_job` + wait + `get_job_result`.
 
@@ -3535,6 +3535,35 @@ Implemented in `MCP_Server/tool_policy.py`, enforced in `CEBridgeClient.send_com
 **Groups** (`CE_MCP_TOOLSET`): `core` (always listed), `memory`, `scan`, `analysis`, `symbols`, `structures`, `table`, `debug`, `asm`, `exec`, `system`, `gui`, `kernel`. Presets: `all`, `minimal` (core, memory, scan), `reverse` (core, memory, scan, analysis, symbols, structures, debug). Unknown entries are ignored with a warning on stderr. A toolset never grants anything the profile denies, and hiding a tool is not a permission: a hidden tool that the profile allows can still be reached through `batch_commands`.
 
 `policy_info(details=false)` reports the active profile, toolset, allow/deny lists, how many tools are listed per group and how many are hidden and why; `details=true` lists the hidden names.
+
+---
+
+## 38. Pointer Path Sets and the Two-Run Comparison (Unit 30)
+
+A pointer chain that works in one run is only useful if it works after the target restarts. This unit keeps chains in the bridge and tests them against a second (third, ...) run. `find_pointer_path` searches for chains; it does not compare. `validate_pointer_chains` tests chains you pass in, but only reports hits for one target. The set tools add the memory between runs, the run count, the ranking and the diagnosis of near misses.
+
+**Workflow.**
+1. Run 1: find the value (scan), then `find_pointer_path(address, save_as="hp")`. The verified chains are stored as set `hp` (run 1). Chains from Cheat Engine's pointer scanner work too: pass them inline to `compare_pointer_paths` with `target` = the address they reach in the current process and `save_as`.
+2. Restart the target. Find the same value again (the address is new).
+3. `compare_pointer_paths(target=<new address>, name="hp")` re-resolves every chain from its `module+RVA` base in the new process. Chains that land exactly on `target` survived the restart. Add `save_as="hp"` to narrow the set to the survivors (they carry `runs=2`); repeat after another restart for `runs=3`.
+
+**`compare_pointer_paths`** (reads memory only; the only state it changes is the set store):
+
+| Parameter | Meaning |
+|-----------|---------|
+| `target` | Address of the same value in the current process. Required. |
+| `name` / `chains` | A stored set, or an inline list `[{"base": "game.exe+0x1A2B3C" \| address, "offsets": [0x40, 0x10], "runs": n}]`. Exactly one. Offsets follow the CE convention (dereference, then add) and may be negative or numeric text. An absolute `base` inside a module is converted to `module+RVA`; module names match case-insensitively; chains written differently but equal count once (`duplicates_ignored`). Max 5000 chains. |
+| `save_as` | Store the survivors under this name. The same name as `name` narrows the set in place; another name leaves it alone (the history is copied). Nothing is stored without it, and an empty result never overwrites or creates a set (`save_note` says so). |
+| `near_delta`, `near_limit` | Chains that resolve to within +-`near_delta` bytes (default 0x100) of `target` are returned as `near_misses` (at most `near_limit`, default 10; 0 turns them off), nearest first. |
+| `offset`, `limit` | Page through the surviving chains. |
+
+**Result:** `target`, `run` (the run number this comparison represents), `compared`, `hits`, `missed` (resolved somewhere else), `unreadable` (a pointer on the way could not be read, e.g. null), `module_missing`, `same_process`, optional `name`, `saved_as` + `set{}` or `save_note`, `duplicates_ignored`, `notes[]`, `near_misses[]` and `total/offset/limit/returned` + `chains[]`. A chain is `{base, offsets, offsets_hex, depth, expression, runs}`; survivors are sorted by `runs` (most confirmed first), then fewest and smallest offsets. A near miss adds `final_address`, `delta` (signed) and `suggested_offsets`: the same chain with its last offset corrected by `delta`, which is the usual effect of a patch that moved a field. It is a lead to verify, not a result.
+
+`same_process: true` means the pid is the one recorded for the previous run: the target was not restarted, so a hit only shows that the chain survives whatever happened in between (a level change, reallocation). It is weaker evidence and the notes say so.
+
+**Set management:** `list_pointer_sets` (name, `chain_count`, `runs`, `arch`, `created`, `updated`, `history[]`), `get_pointer_set(name, offset, limit)` (the chains plus the history) and `drop_pointer_set(name | all)`. History entries are `{run, at, pid, process, target, tested, survivors, source}` (`source`: `find_pointer_path`, `compare` or `inline`); only the last 20 are kept.
+
+**Limits.** 16 sets, 5000 chains per set, 16 offsets per chain, names of letters/digits/`_.-` up to 48 characters. Sets live in bridge memory: they survive target restarts, not a reload of `ce_mcp_bridge.lua` or closing CE; copy chains out with `get_pointer_set` when they matter. The comparison tests chains, it does not search: a chain that `find_pointer_path` did not find in run 1 (it is a capped reverse scan) cannot be confirmed later.
 
 ---
 

@@ -2964,7 +2964,8 @@ def find_code_caves(module: str = "", byte: int = 204, min_size: int = 16, secti
 
 @mcp.tool()
 def find_pointer_path(address: str, max_depth: int = 3, max_offset: int = 1024, max_per_level: int = 16,
-                      max_results: int = 100, protection: str = "+W", wait_seconds: float = 30.0, limit: int = 100) -> str:
+                      max_results: int = 100, protection: str = "+W", save_as: str = "", wait_seconds: float = 30.0,
+                      limit: int = 100) -> str:
     """Find static pointer chains that lead to `address` (a heap/stack value that moves between runs).
 
     Works backwards: each level runs one memory scan for pointers whose value lies within `max_offset` below the
@@ -2974,13 +2975,17 @@ def find_pointer_path(address: str, max_depth: int = 3, max_offset: int = 1024, 
     ("[[game.exe+0x1234]+0x40]+0x100") and `verified`.
 
     This is a plain reverse scan, far less thorough than Cheat Engine's pointer scanner; expect a handful of chains,
-    each costing one full memory scan per frontier address (seconds to minutes in big processes). Re-check the
-    chains after restarting the target with validate_pointer_chains. Background job; see rtti_scan_module for the
-    wait/timeout behaviour, and use cancel_job to stop it.
+    each costing one full memory scan per frontier address (seconds to minutes in big processes).
+
+    Two-run workflow: pass `save_as="hp"` to keep the verified chains in a named set inside the bridge. After the target
+    restarts and you have found the same value again, compare_pointer_paths(target=<new address>, name="hp") keeps only
+    the chains that still reach it (save_as there narrows the set; run it again after a third start). The stored set
+    survives target restarts, not a reload of the bridge script.
+    Background job; see rtti_scan_module for the wait/timeout behaviour, and use cancel_job to stop it.
     """
     return format_result(_run_job("find_pointer_path", _params(
         address=address, max_depth=max_depth, max_offset=max_offset, max_per_level=max_per_level,
-        max_results=max_results, protection=protection), wait_seconds, limit))
+        max_results=max_results, protection=protection, save_as=save_as), wait_seconds, limit))
 
 
 # ---- snapshots ----------------------------------------------------------------------------------------
@@ -3087,6 +3092,59 @@ def get_halted_state(stack_depth: int = 16, extend_ms: int = 0) -> str:
     return format_result(ce_client.send_command("get_halted_state", _params(stack_depth=stack_depth, extend_ms=extend_ms or None)))
 
 # >>> END UNIT-27 <<<
+
+# >>> BEGIN UNIT-30 Pointer path sets: comparing pointer chains across runs <<<
+
+@mcp.tool()
+def compare_pointer_paths(target: str, name: str = "", chains: list[dict] = None, save_as: str = "", near_delta: int = 256,
+                          near_limit: int = 10, offset: int = 0, limit: int = 100) -> str:
+    """Two-run pointer path comparison: which pointer chains from an earlier run still reach the value now?
+
+    Run 1: find_pointer_path(address, save_as="hp") stores the chains of the value you found (or pass chains from
+    Cheat Engine's pointer scanner inline, with `target` = the address they point to in the CURRENT process).
+    Restart the target, find the same value again (scan, or any other way), then call this with `target` = its new
+    address. Every chain is re-resolved from its module+RVA base in the new process; the ones that land exactly on
+    `target` have survived a restart. Run it once more after another restart: the survivors then carry runs=3.
+
+    Args:
+        target: Address of the same value in the current process.
+        name: A stored set (list_pointer_sets). Give this OR chains, not both.
+        chains: Inline [{"base": "game.exe+0x1A2B3C" | address, "offsets": [0x40, 0x10]}]. Offsets are applied after each
+                dereference, outermost first (CE convention). An absolute base inside a module is stored module-relative.
+        save_as: Store the survivors under this name (same name as `name` narrows the set in place). Without it nothing
+                 is stored. An empty result never overwrites a set.
+        near_delta, near_limit: Chains that resolve to within +-near_delta bytes of target are reported as near_misses
+                 with a suggested_offsets correction (a patch that moved the last field); up to near_limit shown.
+        offset, limit: page through the surviving chains.
+
+    Returns hits (survivors), missed (resolved elsewhere), unreadable (a pointer on the way could not be read),
+    module_missing, same_process (true when the target was not restarted since the last run: weaker evidence), and
+    chains[] sorted by runs (most confirmed first), then shortest/smallest. Reads memory only.
+    """
+    return format_result(ce_client.send_command("compare_pointer_paths", _params(
+        target=target, name=name, chains=chains, save_as=save_as, near_delta=near_delta if near_delta != 256 else None,
+        near_limit=near_limit if near_limit != 10 else None, offset=offset or None, limit=limit)))
+
+
+@mcp.tool()
+def list_pointer_sets() -> str:
+    """List the stored pointer chain sets (name, chain_count, runs, history of the runs that produced them)."""
+    return format_result(ce_client.send_command("list_pointer_sets"))
+
+
+@mcp.tool()
+def get_pointer_set(name: str, offset: int = 0, limit: int = 100) -> str:
+    """The chains of a stored set (base, offsets, expression, runs) plus its run history. Feed them to
+    validate_pointer_chains or write them into a cheat table; runs says in how many separate runs a chain reached its value."""
+    return format_result(ce_client.send_command("get_pointer_set", {"name": name, "offset": offset, "limit": limit}))
+
+
+@mcp.tool()
+def drop_pointer_set(name: str = "", all: bool = False) -> str:
+    """Delete one stored pointer set by name, or all of them with all=true."""
+    return format_result(ce_client.send_command("drop_pointer_set", _params(name=name, all=all or None)))
+
+# >>> END UNIT-30 <<<
 
 # >>> BEGIN UNIT-29 Capability profiles and tool groups <<<
 

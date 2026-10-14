@@ -21,6 +21,7 @@ TESTS = Path(__file__).resolve().parent
 ROBUST, JOBS, ANALYSIS = "test_lua_robustness.py", "test_lua_jobs.py", "test_lua_analysis.py"
 BREAKPOINTS = "test_lua_breakpoints.py"
 XREFS = "test_lua_xrefs.py"
+PATHSETS = "test_lua_pathsets.py"
 LOAD = "test_lua_load.py"
 
 # (name, suite, old text, new text, expected) - expected "caught" unless the bug cannot change any observable result
@@ -112,6 +113,30 @@ MUTANTS = [
      '        if false then\n            item.function_start = mod.name .. "+" .. U26.hex(fn.primary.begin_rva)\n            item.function_rva = fn.primary.begin_rva\n        end\n    end\n    return item, addr', "caught"),
     ("xref_code_pointer_keeps_no_instruction", XREFS, "        if start then\n            addr = start\n            item.field_address = U26.hex(r.addr)", "        if false then\n            addr = start\n            item.field_address = U26.hex(r.addr)", "caught"),
     ("xref_trailing_immediate_ignored", XREFS, "for i, e in ipairs(U26.XREF_IMMS) do ends[i] = r.addr + r.width + e end", "for i, e in ipairs(U26.XREF_IMMS) do ends[i] = r.addr + r.width end", "caught"),
+    # --- UNIT-30 (pointer path sets, two-run comparison)
+    ("ps_hit_is_not_exact", PATHSETS, 'if status == "ok" and final == target then', 'if status == "ok" and math.abs(final - target) < 0x10 then', "caught"),
+    ("ps_runs_not_counted", PATHSETS, "runs = r.runs + 1, idx = h.idx", "runs = r.runs, idx = h.idx", "caught"),
+    ("ps_empty_set_stored", PATHSETS, 'if #chains == 0 then return nil, "nothing to store (an existing set is never overwritten with an empty one)" end', "", "caught"),
+    ("ps_x86_addresses_not_wrapped", PATHSETS, "if not is64 then cur = cur & 0xFFFFFFFF end", "if false then cur = cur & 0xFFFFFFFF end", "caught"),
+    ("ps_module_lookup_case_sensitive", PATHSETS, "local m = byName[rec.module:lower()]", "local m = byName[rec.module]", "caught"),
+    ("ps_survivors_fewest_runs_first", PATHSETS, "if a.runs ~= b.runs then return a.runs > b.runs end", "if a.runs ~= b.runs then return a.runs < b.runs end", "caught"),
+    ("ps_survivors_longest_first", PATHSETS, "if #a.offsets ~= #b.offsets then return #a.offsets < #b.offsets end", "if #a.offsets ~= #b.offsets then return #a.offsets > #b.offsets end", "caught"),
+    ("ps_near_fix_wrong_sign", PATHSETS, "fix[#fix] = fix[#fix] - n.delta", "fix[#fix] = fix[#fix] + n.delta", "caught"),
+    ("ps_near_misses_farthest_first", PATHSETS, "if da ~= db then return da < db end", "if da ~= db then return da > db end", "caught"),
+    ("ps_near_delta_default_too_small", PATHSETS, "clampInt(params.near_delta or 0x100, 0, 0x10000)", "clampInt(params.near_delta or 0x10, 0, 0x10000)", "caught"),
+    ("ps_same_process_inverted", PATHSETS, "local sameProcess = last ~= nil and last.pid ~= nil and last.pid == pr.pid", "local sameProcess = last ~= nil and last.pid ~= nil and last.pid ~= pr.pid", "caught"),
+    ("ps_inline_duplicates_kept", PATHSETS, "if seenKey[key] then", "if false then", "caught"),
+    ("ps_module_spelling_not_canonical", PATHSETS, "if m.name:lower() == lname then name = m.name; break end", "if false then name = m.name; break end", "caught"),
+    ("ps_absolute_base_not_made_module_relative", PATHSETS, "if m then rec.module, rec.rva = m.name, base - m.base else rec.abs = base end", "rec.abs = base", "caught"),
+    ("ps_history_unbounded", PATHSETS, "while #history > U26.PS_MAX_HISTORY do", "while false do", "caught"),
+    ("ps_set_cap_missing", PATHSETS, "if not old and U26.psCount() >= U26.PS_MAX_SETS then", "if false then", "caught"),
+    ("ps_saved_copy_shares_history", PATHSETS, "if src then for i, h in ipairs(src.history) do hist[i] = h end end", "if src then hist = src.history end", "caught"),
+    ("ps_names_unchecked", PATHSETS, 'if type(v) == "string" and #v <= 48 and v:match("^[%w_%.%-]+$") then return v end', 'if type(v) == "string" then return v end', "caught"),
+    ("ps_find_save_name_checked_after_the_scans", PATHSETS, "        if nerr then return nerr end\n    end\n    local mods = U26.listModules()\n    local st = {", "        if false then return nerr end\n    end\n    local mods = U26.listModules()\n    local st = {", "caught"),
+    ("ps_survivors_not_paged", PATHSETS, "local limit, offset, page, total = paginate(params, survivors, 100)", "local limit, offset, page, total = paginate({}, survivors, 100)", "caught"),
+    ("ps_fractional_offsets_accepted", PATHSETS, 'if math.type(v) == "float" then return math.tointeger(v) end', 'if math.type(v) == "float" then return v end', "caught"),
+    ("ps_unreadable_pointer_read_as_null", PATHSETS, 'if not ptr then return "unreadable" end', "if not ptr then ptr = 0 end", "caught"),
+    ("ps_found_set_starts_at_run_zero", PATHSETS, "return U26.psPut(name, recs, 1, { {", "return U26.psPut(name, recs, 0, { {", "caught"),
     # --- whole-file behaviour (the live smoke test found both of these)
     ("requireprocess_shadowed_by_the_boolean_variant", LOAD, "local function requireProcessBool()\n    local pid = getOpenedProcessID()\n    return pid and pid > 0\nend", "local function requireProcess()\n    local pid = getOpenedProcessID()\n    return pid and pid > 0\nend", "caught"),
     ("reload_leaves_the_previous_instance_running", LOAD, 'if type(StopMCPBridge) == "function" then\n    local okPrev', 'if false then\n    local okPrev', "caught"),
