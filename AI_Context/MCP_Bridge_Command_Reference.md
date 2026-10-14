@@ -3385,6 +3385,33 @@ All commands return `success: false` with an `error` field on failure:
 
 ---
 
+## 33. Operations & Async Jobs (Unit 25)
+
+### `bridge_status`
+Health/diagnostics. No parameters. Returns `version`, `pipe`, `uptime_seconds`, `client_connected`, `tools_registered`, `ce_version`, `process` (as `get_process_info`, plus `attached`), `drivers` (`dbk_loaded`, `dbvm_loaded`, `debugger_attached`), `state` (`breakpoints`, `hw_slots_used/total`, `dbvm_watches`, `persistent_scans`, `scan_session_active`, `structures`, `jobs_running`, `jobs_tracked`, `scan_job`), `stats` (`requests`, `errors`, `last_method`, `last_ms`, `slowest_method/ms`, `last_error`), `query_memory_region_routines` (`enabled|disabled|unknown`; best-effort, CE has no documented getter) and `warnings[]`. The MCP wrapper adds `reachable` and `python_side` (transport, endpoint, timeouts, last connection error); if CE cannot be reached it returns `reachable:false` and a `hint` instead of raising.
+
+### `read_memory` (`format`)
+`format`: `both` (bridge default, legacy: `data` hex string + `bytes` array), `hex` (`data` only; the MCP tool's default), `base64` (`base64`), `array` (`bytes` only). Unknown values give `INVALID_PARAMS`.
+
+### `read_struct`
+`address`, `fields[]` = `{name, type, offset?, size?}`. `offset` defaults to the end of the previous field (packed). Types: `i8 u8 i16 u16 i32 u32 i64 u64 f32 f64 ptr bool bytes cstring wstring` plus aliases (`byte word dword qword float double int short pointer string utf16`). `size` = bytes for `bytes`/`cstring`, characters for `wstring`. Limits: 512 fields, 64 KB span. One `readBytes` covers the whole span; if that fails each field is read on its own and only unreadable fields get an `error`. Returns `fields[{name,type,offset,value,hex?,error?}]`, `span`, `arch`. Pointers and `u64` values above 2^63 are hex strings.
+
+### `batch`
+`requests[]` = `{method, params}` (max 100, no nesting), `stop_on_error`. Runs sequentially in one main-thread slot. Returns `requested`, `executed`, `failed`, `results[]` (one reply per request, same shapes as the individual calls; a failing request does not fail the batch).
+
+### Async jobs
+| Command | Parameters | Returns |
+|---------|-----------|---------|
+| `start_job` | `kind`, `params` | `job_id`, `state` |
+| `get_job` | `job_id` | `state` (`running|done|failed|cancelled`), `phase` (`scanning|processing`), `progress{current,total,percent,results_found}`, `elapsed_seconds`, `result_summary` |
+| `get_job_result` | `job_id`, `offset`, `limit` | Same shape as the blocking command (`count` for scans; `total/offset/limit/returned` + `addresses|references|callers` for lists). `BUSY` while running |
+| `cancel_job` | `job_id` | `state`, `note` |
+| `list_jobs` | - | `jobs[]` (running + the 20 most recent finished) |
+
+`kind` is one of `scan_all`, `next_scan`, `aob_scan`, `find_references`, `find_call_references`; `params` are the blocking command's parameters. At most 4 jobs run at once (`OUT_OF_RESOURCES`). `scan_all`/`next_scan` jobs own the shared scan session: the blocking `scan_all`, `next_scan` and `get_scan_results` answer `BUSY` until the job finishes. Cancelling a `next_scan` job discards the scan session (CE has no stop-scan call, so the memscan is destroyed); cancel a `scan_all` job and the previous session is untouched. The MCP server also offers `wait_for_job` (client-side polling, capped at 90 s per call).
+
+---
+
 ## Best Practices
 
 1. **Always call `ping` first** to verify connectivity before performing operations.

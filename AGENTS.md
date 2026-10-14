@@ -54,6 +54,7 @@ One self-contained script with its own pure-Lua JSON codec, loaded inside Cheat 
 - **Worker-thread pipe I/O** (`PipeWorker`): a dedicated thread owns the blocking `pipe.acceptConnection()` / `pipe.readBytes()` calls so the CE GUI never freezes. Every request is handed to the main thread via `thread.synchronize(function() response = executeCommand(payload) end)`. **All CE Lua API calls must run on the main thread** — your `cmd_*` handler is already on it when invoked, so just don't spawn new threads that touch CE APIs directly.
 - **Command dispatcher** (`commandHandlers`): a plain table mapping JSON-RPC method name → `cmd_*` function. Several methods have aliases (`read_memory`/`read_bytes`, `find_what_writes_safe` → `cmd_start_dbvm_watch`, etc.).
 - **Zombie cleanup** (`cleanupZombieState`): `StartMCPBridge` always calls `StopMCPBridge` first, which tears down any hardware breakpoints, DBVM watches, and scan objects tracked in `serverState`. This is load-bearing — reloading the script while a HW breakpoint is live otherwise leaves orphaned DR slots and can freeze the target. Any new long-lived resource you add should get a cleanup entry here.
+- **Operations unit (UNIT-25)**: `bridge_status` (health/diagnostics), `read_struct` (many typed fields from one read), `batch` (several commands in one main-thread slot; dispatches through `serverState.dispatch`, which is set right after the `commandHandlers` table) and the **async job system**. Jobs (`start_job`/`get_job`/`get_job_result`/`cancel_job`/`list_jobs`) run `scan_all`, `next_scan`, `aob_scan`, `find_references` and `find_call_references` without blocking CE: scans use CE's own async `MemScan` (no `waitTillDone`; completion via `OnScanDone`, with `getProgress()` polling as a fallback) and the Lua-side post-processing of reference searches is time-sliced from a `createTimer` pump. `scan_all`/`next_scan` jobs own the shared scan session, so the blocking `scan_all`/`next_scan`/`get_scan_results` answer `BUSY` while one runs. New long-lived job resources belong in `cleanupZombieState` step 2b.
 - **Universal 32/64-bit handling** (`getArchInfo`, `captureRegisters`, `captureStack`): always branch on `targetIs64Bit()` and use `readPointer()` instead of `readInteger()`/`readQword()` when you mean "pointer-sized." Hardcoding register names or pointer size will silently break on the other architecture.
 
 ### Adding a new MCP tool
@@ -79,7 +80,7 @@ Two files are the source of truth — there's no codegen, so you must edit both:
 ### Return shape
 - **Success:** `{ success: true, <fields> }`
 - **Error:** `{ success: false, error: "<human msg>", error_code: "<UPPER_SNAKE>" }`
-- **Error code enum:** `NO_PROCESS`, `INVALID_ADDRESS`, `INVALID_PARAMS`, `CE_API_UNAVAILABLE`, `DBVM_NOT_LOADED`, `DBK_NOT_LOADED`, `PERMISSION_DENIED`, `NOT_FOUND`, `OUT_OF_RESOURCES`, `INTERNAL_ERROR`.
+- **Error code enum:** `NO_PROCESS`, `INVALID_ADDRESS`, `INVALID_PARAMS`, `CE_API_UNAVAILABLE`, `DBVM_NOT_LOADED`, `DBK_NOT_LOADED`, `PERMISSION_DENIED`, `NOT_FOUND`, `OUT_OF_RESOURCES`, `BUSY`, `INTERNAL_ERROR`.
 
 ### Addresses
 Output: always hex string via `toHex()` (e.g. `"0x140001000"`). Input: accept string or integer.

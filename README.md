@@ -277,6 +277,16 @@ And many more at `AI_Context/MCP_Bridge_Command_Reference.md`
 
 ---
 
+### Operations & Async Jobs
+| Tool | Description |
+|------|-------------|
+| `bridge_status` | One-call health report (bridge version, uptime, attached process, DBK/DBVM, breakpoint/job counts, request stats, warnings). Still answers when CE is unreachable and says why. |
+| `read_struct` | Read many typed fields (`u32`, `f32`, `ptr`, `cstring`, `wstring`, ...) with a single memory read |
+| `batch_commands` | Run up to 100 commands in one round trip |
+| `start_job`, `get_job`, `get_job_result`, `wait_for_job`, `cancel_job`, `list_jobs` | Run long scans (`scan_all`, `next_scan`, `aob_scan`, `find_references`, `find_call_references`) in the background with progress, without freezing CE or hitting the client timeout |
+
+`read_memory` now takes `format` (`hex` default, `base64`, `array`, `both`); `hex` roughly halves the output of the old default.
+
 ## Critical Configuration
 
 ### BSOD Prevention
@@ -301,7 +311,8 @@ Check these in order:
 2. The MCP client was restarted after adding the server config.
 3. The configured `mcp_cheatengine.py` path exists.
 4. `pip install -r MCP_Server/requirements.txt` has installed both `mcp` and `pywin32`.
-5. Run the MCP `ping` tool. A successful connection returns `success: true` and the bridge version. `process_id: 0` is normal until Cheat Engine is attached to a target process.
+5. Run the MCP `bridge_status` tool: it works even when CE is unreachable and reports whether the pipe is missing (CE not running / bridge not loaded) or busy (another MCP client holds it).
+6. Run the MCP `ping` tool. A successful connection returns `success: true` and the bridge version. `process_id: 0` is normal until Cheat Engine is attached to a target process.
 
 ---
 
