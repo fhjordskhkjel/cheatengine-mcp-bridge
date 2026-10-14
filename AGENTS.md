@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## What this project is
 
-A three-tier bridge that lets AI agents (via MCP) drive Cheat Engine to inspect and manipulate a running Windows process. See `README.md` for user-facing docs. Current wire/app version: `12.0.0`. After the v12 overhaul the bridge exposes **~180 MCP tools** covering memory, process lifecycle, code injection, symbol management, assembly/compilation, GUI automation, input, cheat tables, and kernel-mode operations.
+A three-tier bridge that lets AI agents (via MCP) drive Cheat Engine to inspect and manipulate a running Windows process. See `README.md` for user-facing docs. Current wire/app version: `12.0.0`. After the v12 overhaul the bridge exposes **200+ MCP tools** covering memory, process lifecycle, code injection, symbol management, assembly/compilation, GUI automation, input, cheat tables, and kernel-mode operations.
 
 ## Commands
 
@@ -12,13 +12,16 @@ A three-tier bridge that lets AI agents (via MCP) drive Cheat Engine to inspect 
 # Install Python deps (Windows only — uses pywin32)
 pip install -r MCP_Server/requirements.txt
 
-# Integration test suite (requires: CE running, ce_mcp_bridge.lua loaded, a process attached)
+# Offline suites (no Cheat Engine needed: real bridge code against a fake CE API, ~30 s)
+python tests/run_all.py            # add --real (real-DLL checks) and/or --mutation (do the tests catch breakages?)
+
+# Live end-to-end suite (requires: CE running, ce_mcp_bridge.lua loaded, a process attached)
 python MCP_Server/test_mcp.py
 ```
 
 Loading the Lua side in Cheat Engine: `File -> Execute Script -> open MCP_Server/ce_mcp_bridge.lua -> Execute`. Some CE builds expose this through `Table -> Show Cheat Table Lua Script`; in that case execute `dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])` instead of pasting the full bridge. Success log: `[MCP v12.0.0] MCP Server Listening on: CE_MCP_Bridge_v99`. Re-executing the script auto-calls `StopMCPBridge` / `cleanupZombieState` first, so reloading is safe.
 
-There is **no build step, no linter, and no unit-test harness**. `test_mcp.py` is a single end-to-end script that talks to the live Named Pipe; running a "single test" means editing the `all_tests` dict in `test_mcp.py:main` or commenting out sections.
+There is **no build step and no linter**. Run `python tests/run_all.py` after every change to `ce_mcp_bridge.lua` or `mcp_cheatengine.py`: the offline suites in `tests/` execute the real Lua handlers inside CE's own Lua 5.3 DLL against a fake CE API and exercise the Python client against a fake bridge on a real named pipe (see `tests/README.md`). New behaviour needs a test in the matching suite plus, for Lua logic, a mutant in `tests/mutation_check.py`. A fake CE proves the bridge logic, not CE's real API behaviour. `MCP_Server/test_mcp.py` is the single end-to-end script that talks to the live Named Pipe; running a "single test" means editing the `all_tests` dict in `test_mcp.py:main` or commenting out sections.
 
 The MCP server is normally spawned by the AI client over stdio, but can be launched directly with `python MCP_Server/mcp_cheatengine.py` for debugging (it blocks waiting for stdio JSON-RPC).
 

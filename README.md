@@ -194,7 +194,7 @@ Use the `ping` tool to verify connectivity:
 
 ---
 
-## ~180 MCP Tools Available
+## 200+ MCP Tools Available
 
 ### Memory
 | Tool | Description |
@@ -368,7 +368,15 @@ README.md                               # User-facing documentation
 MCP_Server/
 ├── mcp_cheatengine.py                  # Python MCP Server (FastMCP)
 ├── ce_mcp_bridge.lua                   # Cheat Engine Lua Bridge
-└── test_mcp.py                         # Test Suite
+└── test_mcp.py                         # Live end-to-end test (needs Cheat Engine running)
+
+tests/
+├── run_all.py                          # Runs every offline suite (no Cheat Engine needed)
+├── test_lua_*.py                       # Lua bridge: codec/replies, jobs, PE/RTTI/analysis
+├── test_client_*.py                    # Python MCP client against a fake bridge pipe
+├── mutation_check.py                   # Proves the suites catch deliberate breakages
+├── lua_harness.py, testkit.py          # Shared helpers
+└── README.md
 
 AI_Context/
 ├── BATCH_WORKER_BRIEFING.md            # Parallel-worker task specifications (v12 overhaul)
@@ -381,7 +389,13 @@ AI_Context/
 
 ## Testing
 
-Running the test:
+### Offline suites (no Cheat Engine needed)
+```bash
+python tests/run_all.py
+```
+Runs the real bridge code against a fake Cheat Engine API plus the Python client against a fake bridge pipe (about 30 seconds). Add `--real` to also validate the PE/RTTI parsing against real system DLLs and `--mutation` to check that the suites catch deliberate breakages. Details in [`tests/README.md`](tests/README.md).
+
+### Live end-to-end test (Cheat Engine running, bridge loaded, a process attached)
 ```bash
 python MCP_Server/test_mcp.py
 ```
