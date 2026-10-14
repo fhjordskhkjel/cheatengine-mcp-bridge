@@ -2,6 +2,16 @@
 -- CHEATENGINE MCP BRIDGE v12.0.0
 -- ============================================================================
 
+-- Reload safety. serverState (and everything else below) is local to one execution of this script, and the global
+-- StopMCPBridge captures it. If this execution only called its own StopMCPBridge it would stop nothing: the worker
+-- thread of the PREVIOUS execution would keep serving the same pipe next to the new one, and each client connection
+-- would randomly reach either. At this point the global still holds the previous execution's StopMCPBridge, so ask it
+-- to shut its instance down before this chunk redefines anything.
+if type(StopMCPBridge) == "function" then
+    local okPrev, errPrev = pcall(StopMCPBridge)
+    if not okPrev then print("[MCP] could not stop the previous bridge instance: " .. tostring(errPrev)) end
+end
+
 local PIPE_NAME = "CE_MCP_Bridge_v99"
 local VERSION = "12.0.0"
 
@@ -1649,12 +1659,15 @@ end
 
 -- Hit callbacks MUST reach debug_continueFromBreakpoint, otherwise the target
 -- thread stays halted. Run the body under pcall and always continue - except for
--- a break-and-inspect hit, where the body returns "halt" and CE keeps the thread stopped.
+-- a break-and-inspect hit, where the body returns "halt" and the thread is left stopped.
+-- What CE does with the callback's return value (measured in a live CE, see tests/live_smoke.py): nil, false, true and
+-- 0 all make CE resume the thread by itself; a NON-ZERO number (1, 2) means "the script took care of it" and CE leaves
+-- the thread stopped. So both paths return 1: the normal one after continuing explicitly, the halt one without.
 local function safeBpCallback(body)
     return function()
         local ok, result = pcall(body)
         if not ok then log("Breakpoint callback error: " .. tostring(result)) end
-        if ok and result == "halt" then return 0 end
+        if ok and result == "halt" then return 1 end
         debug_continueFromBreakpoint(co_run)
         return 1
     end
@@ -4148,7 +4161,7 @@ end
 serverState.persistent_scans = serverState.persistent_scans or {}
 
 -- Helper: NO_PROCESS guard used by all Unit-15 commands
-local function requireProcess()
+local function requireProcessPair()
     local pid = getOpenedProcessID()
     if not pid or pid == 0 then
         return false, { success = false, error = "No process attached", error_code = "NO_PROCESS" }
@@ -4173,7 +4186,7 @@ end
 -- resolveScanOption / resolveScanInputs live in the HELPER FUNCTIONS section at the top of this file (global, so every cmd_* handler shares one mapping).
 
 function cmd_aob_scan_unique(params)
-    local ok, err = requireProcess()
+    local ok, err = requireProcessPair()
     if not ok then return err end
 
     local pattern    = params.pattern
@@ -4215,7 +4228,7 @@ function cmd_aob_scan_unique(params)
 end
 
 function cmd_aob_scan_module(params)
-    local ok, err = requireProcess()
+    local ok, err = requireProcessPair()
     if not ok then return err end
 
     local pattern     = params.pattern
@@ -4267,7 +4280,7 @@ end
 
 function cmd_aob_scan_module_unique(params)
     -- requireProcess() is also called inside cmd_aob_scan_module; early-exit here gives a cleaner error path
-    local ok, err = requireProcess()
+    local ok, err = requireProcessPair()
     if not ok then return err end
 
     local r = cmd_aob_scan_module(params)
@@ -4291,7 +4304,7 @@ function cmd_aob_scan_module_unique(params)
 end
 
 function cmd_pointer_rescan(params)
-    local ok, err = requireProcess()
+    local ok, err = requireProcessPair()
     if not ok then return err end
 
     local value               = params.value
@@ -4322,7 +4335,7 @@ function cmd_pointer_rescan(params)
 end
 
 function cmd_create_persistent_scan(params)
-    local ok, err = requireProcess()
+    local ok, err = requireProcessPair()
     if not ok then return err end
 
     local name = params.name
@@ -4354,7 +4367,7 @@ function cmd_create_persistent_scan(params)
 end
 
 function cmd_persistent_scan_first_scan(params)
-    local ok, err = requireProcess()
+    local ok, err = requireProcessPair()
     if not ok then return err end
 
     local name        = params.name
@@ -4419,7 +4432,7 @@ function cmd_persistent_scan_first_scan(params)
 end
 
 function cmd_persistent_scan_next_scan(params)
-    local ok, err = requireProcess()
+    local ok, err = requireProcessPair()
     if not ok then return err end
 
     local name        = params.name
@@ -4761,12 +4774,6 @@ end
 -- ============================================================================
 
 -- Helper: check process is attached (for tools that need a target process address)
-local function requireProcess()
-    if (getOpenedProcessID() or 0) == 0 then
-        return false, { success = false, error = "No process attached", error_code = "NO_PROCESS" }
-    end
-    return true, nil
-end
 -- >>> BEGIN UNIT-12 Symbol Management <<<
 function cmd_register_symbol(params)
     local name = params.name
@@ -4936,7 +4943,7 @@ local function u11_guard()
 end
 
 function cmd_assemble_instruction(params)
-    local ok, err = requireProcess()
+    local ok, err = requireProcessPair()
     if not ok then return err end
 
     local line = params.line
@@ -5063,7 +5070,7 @@ function cmd_compile_cs_code(params)
 end
 
 function cmd_generate_api_hook_script(params)
-    local ok, err = requireProcess()
+    local ok, err = requireProcessPair()
     if not ok then return err end
 
     local address = params.address
@@ -5096,7 +5103,7 @@ function cmd_generate_api_hook_script(params)
 end
 
 function cmd_generate_code_injection_script(params)
-    local ok, err = requireProcess()
+    local ok, err = requireProcessPair()
     if not ok then return err end
 
     local address = params.address
@@ -5507,13 +5514,13 @@ function cmd_unpause_process(params) return callWithProcessGuard(unpause) end
 -- Lua 5.1 compat: 'unpack' moved to 'table.unpack' in Lua 5.2+
 local unpack = unpack or table.unpack
 
-local function requireProcess()
+local function requireProcessBool()
     local pid = getOpenedProcessID()
     return pid and pid > 0
 end
 
 function cmd_inject_dll(params)
-    if not requireProcess() then return { success = false, error = "No process attached" } end
+    if not requireProcessBool() then return { success = false, error = "No process attached" } end
     local filepath = params.filepath
     if not filepath then return { success = false, error = "No filepath provided" } end
     local skip = params.skip_symbol_reload or false
@@ -5526,7 +5533,7 @@ function cmd_inject_dll(params)
 end
 
 function cmd_inject_dotnet_dll(params)
-    if not requireProcess() then return { success = false, error = "No process attached" } end
+    if not requireProcessBool() then return { success = false, error = "No process attached" } end
     local dllpath    = params.filepath
     local className  = params.class_name
     local methodName = params.method_name
@@ -5546,7 +5553,7 @@ function cmd_inject_dotnet_dll(params)
 end
 
 function cmd_execute_code(params)
-    if not requireProcess() then return { success = false, error = "No process attached" } end
+    if not requireProcessBool() then return { success = false, error = "No process attached" } end
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end
@@ -5563,7 +5570,7 @@ function cmd_execute_code(params)
 end
 
 function cmd_execute_code_ex(params)
-    if not requireProcess() then return { success = false, error = "No process attached" } end
+    if not requireProcessBool() then return { success = false, error = "No process attached" } end
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end
@@ -5581,7 +5588,7 @@ function cmd_execute_code_ex(params)
 end
 
 function cmd_execute_method(params)
-    if not requireProcess() then return { success = false, error = "No process attached" } end
+    if not requireProcessBool() then return { success = false, error = "No process attached" } end
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end

@@ -28,6 +28,7 @@ SUITES = [
     ("lua analysis",   "test_lua_analysis.py",   False),
     ("lua breakpoints", "test_lua_breakpoints.py", False),
     ("lua xrefs",     "test_lua_xrefs.py",      False),
+    ("lua load",      "test_lua_load.py",       False),
     ("client retry",   "test_client_retry.py",   True),
     ("client jobs",    "test_client_jobs.py",    True),
     ("client analysis", "test_client_analysis.py", True),

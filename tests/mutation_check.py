@@ -21,6 +21,7 @@ TESTS = Path(__file__).resolve().parent
 ROBUST, JOBS, ANALYSIS = "test_lua_robustness.py", "test_lua_jobs.py", "test_lua_analysis.py"
 BREAKPOINTS = "test_lua_breakpoints.py"
 XREFS = "test_lua_xrefs.py"
+LOAD = "test_lua_load.py"
 
 # (name, suite, old text, new text, expected) - expected "caught" unless the bug cannot change any observable result
 MUTANTS = [
@@ -71,7 +72,8 @@ MUTANTS = [
     # --- UNIT-27 part C (breakpoint control)
     ("bp_condition_ignored", BREAKPOINTS, "    local pass, condErr = BPX.test(bp)\n    if not pass then", "    local pass, condErr = true, nil\n    if not pass then", "caught"),
     ("bp_max_hits_not_enforced", BREAKPOINTS, "    if bp.max_hits and (bp.total_hits or 0) >= bp.max_hits then", "    if false then", "caught"),
-    ("bp_break_mode_resumes_anyway", BREAKPOINTS, '        if ok and result == "halt" then return 0 end', "        if false then return 0 end", "caught"),
+    ("bp_break_mode_resumes_anyway", BREAKPOINTS, '        if ok and result == "halt" then return 1 end', "        if false then return 1 end", "caught"),
+    ("bp_halt_returns_zero_which_ce_treats_as_resume", BREAKPOINTS, '        if ok and result == "halt" then return 1 end', '        if ok and result == "halt" then return 0 end', "caught"),
     ("bp_watchdog_never_resumes", BREAKPOINTS, "    if now >= h.deadline or now >= h.hard_deadline then", "    if false then", "caught"),
     ("bp_data_alignment_unchecked", BREAKPOINTS, "        if addr % size ~= 0 then", "        if false then", "caught"),
     ("bp_read_filter_removed", BREAKPOINTS, '        if accessType == "r" and prev ~= nil and value ~= prev then return nil end', "        if false then return nil end", "caught"),
@@ -110,6 +112,9 @@ MUTANTS = [
      '        if false then\n            item.function_start = mod.name .. "+" .. U26.hex(fn.primary.begin_rva)\n            item.function_rva = fn.primary.begin_rva\n        end\n    end\n    return item, addr', "caught"),
     ("xref_code_pointer_keeps_no_instruction", XREFS, "        if start then\n            addr = start\n            item.field_address = U26.hex(r.addr)", "        if false then\n            addr = start\n            item.field_address = U26.hex(r.addr)", "caught"),
     ("xref_trailing_immediate_ignored", XREFS, "for i, e in ipairs(U26.XREF_IMMS) do ends[i] = r.addr + r.width + e end", "for i, e in ipairs(U26.XREF_IMMS) do ends[i] = r.addr + r.width end", "caught"),
+    # --- whole-file behaviour (the live smoke test found both of these)
+    ("requireprocess_shadowed_by_the_boolean_variant", LOAD, "local function requireProcessBool()\n    local pid = getOpenedProcessID()\n    return pid and pid > 0\nend", "local function requireProcess()\n    local pid = getOpenedProcessID()\n    return pid and pid > 0\nend", "caught"),
+    ("reload_leaves_the_previous_instance_running", LOAD, 'if type(StopMCPBridge) == "function" then\n    local okPrev', 'if false then\n    local okPrev', "caught"),
     # Defensive only: a false x86 locator is harmless unless something points at it, so no result changes.
     ("x86_locator_sanity_check_removed", ANALYSIS, "ok = nb >= 1 and nb <= 64 and arr >= mod.base and arr < mod.base + mod.size", "ok = true", "survives"),
 ]

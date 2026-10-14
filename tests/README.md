@@ -25,6 +25,7 @@ python tests/test_lua_jobs.py        # a single suite (exit code 0 = all passed)
 | `test_lua_jobs.py` | `read_memory` formats, `read_struct`, `batch`, `bridge_status`, and the async job system (scan jobs, poll fallback, cancel, caps, cleanup) |
 | `test_lua_analysis.py` | PE imports/exports/TLS, RVA/IDA translation, RTTI, string refs, code caves, pointer paths, snapshots, `export_names`/`import_names`/`export_structures`, on synthetic x64 **and** x86 images |
 | `test_lua_xrefs.py` | `find_xrefs`: calls/jumps (rel32, rel8, across chunk borders), rip-relative operands and their read/write classification, absolute pointers, RVAs and the `.pdata` exclusion, ranges, module selection, limits, on synthetic x64 and x86 images with a fake instruction decoder |
+| `test_lua_load.py` | The WHOLE bridge file executed in a fake CE (not extracted pieces): executing it twice must stop the first instance, and the real pipe worker/dispatcher answers every registered method with a proper reply (never a bare `true`; process-less calls say `NO_PROCESS`). Catches what piecewise tests cannot: helpers shadowing each other, load-time errors, reload behaviour |
 | `test_client_retry.py` | The Python client against a fake bridge on a real named pipe: no double execution of state-changing commands, reconnect backoff, timeouts that must not hang, bad UTF-8, RPC errors |
 | `test_client_jobs.py` | UNIT-25 MCP tools: parameter forwarding, `wait_for_job`, `batch_commands` retry policy |
 | `test_client_analysis.py` | UNIT-26 MCP tools: parameter cleaning, job wrappers (`wait_seconds` / `timed_out`), tool registration and schemas |
@@ -43,6 +44,26 @@ most-referenced and some rarely-referenced targets plus one 64-byte range, and t
 must be identical. Without capstone this part is skipped.
 
 Shared fake CE API for the suites that run synthetic PE images: `fake_ce.py` (`STUBS`, `HELPERS`).
+
+## Live smoke test (needs a running Cheat Engine)
+`python tests/live_smoke.py [--only SECTION] [-v]` checks the things only a real CE can confirm. It spawns its own
+throwaway target (`live_target.py`), attaches CE to it, runs about 60 checks through the real MCP tool layer and
+re-attaches whatever CE had open before. Sections: connection, attach, memory, scan jobs, pe analysis (incl. RTTI and
+`recover_struct` on a real `msvcp140.dll`), xrefs (hits verified by reading the bytes back from the live process),
+snapshots, breakpoints (max_hits, conditions, data breakpoints, break mode: the target's counter must really stand still,
+the watchdog and `clear_all_breakpoints` must resume it) and bridge health. It exits with code 77 (skipped) when the pipe
+does not exist. It is not part of `run_all.py`.
+
+What it found when first run (all fixed, each now covered offline as well):
+- every UNIT-25..28 tool answered `true` in CE: three different `requireProcess` helpers had shadowed each other
+  (`test_lua_robustness.py` lint + `test_lua_load.py`);
+- re-executing the script left the old bridge instance serving the pipe next to the new one (`test_lua_load.py`);
+- break mode did not stop the thread: a breakpoint callback must return a NON-ZERO number to leave the thread stopped
+  (`nil`, `false`, `true`, `0` all make CE resume it) - the fake debugger now models this.
+
+CE quirks worth knowing: `debug_isBroken()` returns a function value instead of a boolean in CE 7.6 (the bridge never
+trusts it), and the debugger interface for the first breakpoint comes from CE's own settings - the VEH debugger (2)
+crashed the throwaway Python target, so the smoke test starts interface 1 (`debug_process(1)`) explicitly.
 
 ## Mutation check
 `mutation_check.py` applies one small plausible bug at a time to a copy of `ce_mcp_bridge.lua` and requires the

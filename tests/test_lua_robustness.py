@@ -147,5 +147,33 @@ return table.concat(results, "\n")
         print("-- executeCommand"); print(msg)
 
 
+def contract_lint(path):
+    """The three "is a process attached?" helpers have different return contracts. They once shared one name, so the
+    last `local function requireProcess` silently replaced the earlier ones for everything below it (every UNIT-25..28
+    tool returned `true` in a real Cheat Engine while the offline tests, which extract only the first definition,
+    passed). Each contract now has its own name; this lint keeps it that way."""
+    import re
+    lines = load(path).split("\n")
+    print("-- requireProcess contract lint")
+    contracts = {
+        "requireProcess": (r"local \w+ = requireProcess\(\)\s*$", "returns nil or an error table"),
+        "requireProcessPair": (r"local ok, err = requireProcessPair\(\)\s*$", "returns ok, err"),
+        "requireProcessBool": (r"if not requireProcessBool\(\) then", "returns a boolean"),
+    }
+    for name, (call_re, meaning) in contracts.items():
+        defs = [i for i, l in enumerate(lines) if re.match(r"local function %s\(\)" % name, l)]
+        print(("PASS  " if len(defs) == 1 else "FAIL  ") + "%s is defined exactly once (found %d)" % (name, len(defs)))
+        calls = [(i, l) for i, l in enumerate(lines) if re.search(r"\b%s\(" % name, l) and not l.lstrip().startswith("--") and not re.match(r"local function ", l)]
+        bad = [(i + 1, l.strip()[:70]) for i, l in calls if not re.search(call_re, l)]
+        print(("PASS  " if not bad else "FAIL  ") + "every call of %s expects what it %s (%d call sites)%s" % (name, meaning, len(calls), "" if not bad else "  bad=%s" % bad[:3]))
+        early = [i + 1 for i, _ in calls if defs and i < defs[0]]
+        print(("PASS  " if not early else "FAIL  ") + "%s is never called before its definition%s" % (name, "" if not early else "  lines=%s" % early[:3]))
+    dup = sorted({m.group(1) for l in lines for m in [re.match(r"local function (requireProcess\w*)\(", l)] if m} - set(contracts))
+    print(("PASS  " if not dup else "FAIL  ") + "no other requireProcess* helper has appeared%s" % ("" if not dup else "  " + str(dup)))
+    body = "\n".join(lines[next(i for i, l in enumerate(lines) if l.startswith("local function requireProcess()")):][:7])
+    print(("PASS  " if "return nil" in body and "error_code" in body else "FAIL  ") + "requireProcess() returns nil when a process is attached, else an error table")
+
+
 suite("bridge", arg_path(1, BRIDGE_LUA))
+contract_lint(arg_path(1, BRIDGE_LUA))
 finish()

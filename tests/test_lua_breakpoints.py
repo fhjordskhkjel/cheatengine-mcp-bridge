@@ -79,6 +79,8 @@ function FIRE(addr, regs)
   local bp = BPS[addr]
   if not bp then error(string.format('no breakpoint armed at 0x%X', addr), 2) end
   local ret = bp.cb()
+  -- measured in a real CE: unless the callback returns a non-zero number, CE resumes the thread by itself
+  if BROKEN and not (type(ret) == "number" and ret ~= 0) then BROKEN = false end
   return ret, #CONTINUES - before
 end
 '''
@@ -175,7 +177,7 @@ poke(0x8010, string.char(0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0))
 r = cmd_set_breakpoint({ address = 0x6000, id = "b", mode = "break", halt_timeout_ms = 150, inspect = { { expr = "RDX + 0x10", size = 8 } } })
 eq("break mode armed", r.success and r.mode == "break" and r.halt_timeout_ms == 150, true)
 ret, cont = FIRE(0x6000, { RAX = 1, RDX = 0x8000, RIP = 0x6000, RSP = 0x7000 })
-eq("break mode leaves the thread stopped (returns 0, no continue)", ret == 0 and cont == 0 and BROKEN == true, true)
+eq("break mode leaves the thread stopped (non-zero return, no continue)", ret == 1 and cont == 0 and BROKEN == true, true)
 eq("halted state recorded with the inspected memory", serverState.halted.id == "b" and serverState.halted.memory[1].hex == "DE AD BE EF 00 00 00 00", true)
 eq("list shows the halted state", listed("b").state, "halted")
 CONTEXT_RAX = 999

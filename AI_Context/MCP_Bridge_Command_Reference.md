@@ -3467,9 +3467,11 @@ Heuristics, in order, per slot: pointer-sized pointer (or null) in every instanc
 |-----------|---------|
 | `condition` | Expression that must be true for a hit to be recorded. Environment: registers (`RAX`..`R15`, `RIP`, `RSP`, `EFLAGS`; x86 `EAX`..; case-insensitive), `u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 ptr` (memory readers; `nil` when unreadable), `hits()` (matched so far), `seen()` (all hits), `abs min max floor`. Nothing else is visible (`os`, `io`, `load`, `_G` are `nil`). Runs under an instruction budget (200 000 VM instructions), so `while true do end` cannot hang the target. Max 500 characters. A condition that raises an error records the hit with `condition_error` and is disabled after 5 failures (`condition_disabled`). |
 | `max_hits` | Detach after N matching hits (the debug register is freed; the hits stay readable; `state:"completed"`). The removal is deferred with CE's `queue()` when available, because detaching inside the breakpoint's own callback is risky. |
-| `mode` | `"log"` (default) or `"break"`. Break mode returns 0 from CE's callback and leaves the thread stopped. |
+| `mode` | `"log"` (default) or `"break"`. Break mode leaves the thread stopped by returning a non-zero number from CE's callback without continuing. |
 | `halt_timeout_ms` | Watchdog for break mode (default 10 000, max 300 000, hard limit 600 s in total including steps). When it expires the bridge resumes the thread itself (`auto_resumed` counter, `last_halt.reason:"timeout"`). |
 | `inspect` | Break mode only: up to 8 `{expr, size}` entries; each `expr` (same language as `condition`) yields an address whose `size` bytes (<= 256) are captured at the moment of the hit. |
+
+CE chooses the debugger interface from its own settings when the first breakpoint starts the debugger. The VEH debugger (`debug_process` interface 2) injects code into the target and crashed a plain Python process in testing; start the Windows debugger explicitly with `debug_process(1)` when a target dislikes it.
 
 Data breakpoints are validated: `size` must be 1, 2, 4 or 8, the address must be aligned to `size`, `access_type` must be `r`, `w` or `rw`. Hits now read the value with the watched size and report `previous_value` and `value_changed` (a write of the same value is `false`). `access_type:"r"` is an approximation: x86 debug registers cannot watch reads only, so it watches both and drops hits where the value changed.
 
@@ -3477,7 +3479,7 @@ Data breakpoints are validated: `size` must be 1, 2, 4 or 8, the address must be
 
 `get_halted_state` (`stack_depth`, `extend_ms`) describes a thread that a break-mode breakpoint stopped: `halted`, `breakpoint`, fresh `registers` (the context is re-read), `instruction`, `stack`, `memory` (the inspected regions), `hit`, `halted_seconds`, `auto_resume_in_seconds`, `stepping`/`steps`. When nothing is stopped it returns `halted:false` and `last_halt` (`resumed`, `timeout`, `breakpoint removed`, `all breakpoints cleared`, `resumed outside the bridge`). Resume with `debug_continue` (`run`, `step_into`, `step_over`); after a step the thread stays under bridge control (the watchdog restarts) and `get_halted_state` shows the new position. Removing the breakpoint, `clear_all_breakpoints` and reloading the bridge also resume the thread.
 
-Assumption to verify live: CE keeps the thread stopped when a `debug_setBreakpoint` callback returns 0 without calling `debug_continueFromBreakpoint` (documented for `debugger_onBreakpoint`; the offline tests simulate it).
+Verified in a live Cheat Engine (`tests/live_smoke.py`): what a `debug_setBreakpoint` callback returns decides what CE does. `nil`, `false`, `true` and `0` make CE resume the thread by itself; a **non-zero number** (1, 2) means the script took care of it and the thread stays stopped. Break mode therefore returns 1 without continuing; the normal path continues explicitly and also returns 1. Note that `debug_isBroken()` returns a function value instead of a boolean in at least CE 7.6 (x64), so the bridge never trusts it: the watchdog resumes on timeout whatever it says.
 
 <!-- UNIT-27 end -->
 
