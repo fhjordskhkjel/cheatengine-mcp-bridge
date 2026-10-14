@@ -2664,10 +2664,12 @@ def start_job(kind: str, params: dict = None) -> str:
     then fetch the data with get_job_result. Up to 4 jobs run at once.
 
     Args:
-        kind: 'scan_all' | 'next_scan' | 'aob_scan' | 'find_references' | 'find_call_references'.
+        kind: 'scan_all' | 'next_scan' | 'aob_scan' | 'find_references' | 'find_call_references' | 'find_xrefs' |
+              'rtti_scan' | 'find_string_refs' | 'find_code_caves' | 'find_pointer_path'.
         params: The same parameters the matching blocking tool takes, e.g.
                 scan_all {"value": "100", "type": "dword"}, aob_scan {"pattern": "48 8B ?? 05", "limit": 100},
-                find_references {"address": "0x140001000"}, find_call_references {"address": "game.exe+1234"}.
+                find_references {"address": "0x140001000"}, find_call_references {"address": "game.exe+1234"},
+                find_xrefs {"address": "game.exe+1234", "kinds": "call,jmp"}.
 
     scan_all/next_scan own the shared scan session: while one runs, scan_all, next_scan and
     get_scan_results answer error_code BUSY. Cancelling a next_scan discards the scan session.
@@ -2907,6 +2909,39 @@ def find_string_refs(text: str = "", address: str = "", module: str = "", wide: 
     """
     return format_result(_run_job("find_string_refs", _params(
         text=text, address=address, module=module, wide=wide or None, match=match, include_data=include_data), wait_seconds, limit))
+
+
+@mcp.tool()
+def find_xrefs(address: str, size: int = 1, module: str = "", kinds: str = "", max_results: int = 5000,
+               wait_seconds: float = 30.0, limit: int = 100, offset: int = 0) -> str:
+    """Find everything that references `address` (or the `size` bytes starting there): "who calls this function",
+    "who touches this variable", "which table points at this".
+
+    Finds, in the scanned module(s):
+      call / jmp / jcc  rel32 and short (rel8) branches whose target is in the range
+      rip               x64 rip-relative operands (lea/mov/cmp/call [rip+x] ...); `access` says read | write |
+                        read/write | address (lea) | call | jump
+      abs_code          absolute pointers inside code (x86 push/mov imm32, x64 mov r64,imm64); `address` is the
+                        instruction when one is found and `field_address` the pointer itself
+      abs_data          pointer-aligned absolute pointers in data sections (vtables, pointer tables)
+      rva               32-bit RVAs in data (x64 jump tables); the .pdata exception table is skipped
+    Each reference has address, module+RVA `expression`, section, instruction text and the enclosing function
+    (`function_start`, from .pdata on x64). The result also lists the calling functions with counts (`functions`).
+
+    Args:
+        address: Target address (hex string, symbol or module+offset).
+        size: Treat [address, address+size) as the target - e.g. a whole struct or a function body's first bytes.
+              Absolute pointers inside code are only searched for sizes up to 16.
+        module: Module to scan - a name, "all", or empty for the module that contains `address` (else the main module).
+        kinds: Comma separated subset of call, jmp, jcc, rip, abs, abs_code, abs_data, rva (default: all).
+        max_results: Stop after this many raw hits (default 5000; `truncated` is set when reached).
+
+    Static references only: pointers stored on the heap/stack are not found (use find_pointer_path for those).
+    Background job; see rtti_scan_module for the wait/timeout behaviour.
+    """
+    return format_result(_run_job("find_xrefs", _params(address=address, size=size if size != 1 else None, module=module,
+                                                        kinds=kinds, max_results=max_results if max_results != 5000 else None),
+                                  wait_seconds, limit, offset))
 
 
 @mcp.tool()

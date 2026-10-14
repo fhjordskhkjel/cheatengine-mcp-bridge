@@ -179,6 +179,12 @@ mod.find_string_refs(text="Hello", wait_seconds=3)
 check("find_string_refs: params (wide dropped when false)", params_seen["start_job"] == {"kind": "find_string_refs", "params": {"text": "Hello", "match": "start", "include_data": True}}, params_seen["start_job"])
 mod.find_string_refs(address="0x1000", wide=True, match="any", include_data=False, wait_seconds=3)
 check("find_string_refs: address/wide/any/no-data", params_seen["start_job"]["params"] == {"address": "0x1000", "wide": True, "match": "any", "include_data": False}, params_seen["start_job"])
+out = json.loads(mod.find_xrefs("game.exe+1234", wait_seconds=3, limit=20, offset=40))
+check("find_xrefs: defaults send only the address", params_seen["start_job"] == {"kind": "find_xrefs", "params": {"address": "game.exe+1234"}}, params_seen["start_job"])
+check("find_xrefs: paging goes to get_job_result", out.get("echo_offset") == 40 and out.get("echo_limit") == 20, out)
+mod.find_xrefs("0x3000", size=32, module="all", kinds="call,rip", max_results=100, wait_seconds=3)
+check("find_xrefs: size/module/kinds/max_results forwarded", params_seen["start_job"] == {"kind": "find_xrefs", "params": {
+    "address": "0x3000", "size": 32, "module": "all", "kinds": "call,rip", "max_results": 100}}, params_seen["start_job"])
 
 # ---- retry policy table for the new bridge methods
 for m, want in [("pe_info", True), ("get_halted_state", True), ("pe_functions", True), ("pe_imports", True), ("pe_exports", True), ("pe_tls_callbacks", True), ("va_to_rva", True),
@@ -189,10 +195,11 @@ for m, want in [("pe_info", True), ("get_halted_state", True), ("pe_functions", 
 # ---- MCP registration / schemas
 tools = {tool.name: tool for tool in mod.mcp._tool_manager.list_tools()}
 need = ["pe_info", "get_halted_state", "pe_functions", "recover_struct", "pe_imports", "pe_exports", "pe_tls_callbacks", "va_to_rva", "rva_to_va", "rebase_address", "export_names", "export_structures",
-        "import_names", "rtti_scan_module", "find_string_refs", "find_code_caves", "find_pointer_path", "snapshot_region", "list_snapshots",
+        "import_names", "rtti_scan_module", "find_string_refs", "find_xrefs", "find_code_caves", "find_pointer_path", "snapshot_region", "list_snapshots",
         "delete_snapshot", "diff_snapshots"]
 check("all new tools registered with MCP", all(n in tools for n in need), [n for n in need if n not in tools])
 check("diff_snapshots schema", tools["diff_snapshots"].parameters["properties"]["snapshots"]["type"] == "array", tools["diff_snapshots"].parameters)
+check("find_xrefs requires address", tools["find_xrefs"].parameters.get("required") == ["address"], tools["find_xrefs"].parameters.get("required"))
 check("find_pointer_path requires address", tools["find_pointer_path"].parameters.get("required") == ["address"], tools["find_pointer_path"].parameters.get("required"))
 
 stop = True

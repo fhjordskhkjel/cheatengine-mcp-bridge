@@ -27,6 +27,7 @@ SUITES = [
     ("lua jobs",       "test_lua_jobs.py",       False),
     ("lua analysis",   "test_lua_analysis.py",   False),
     ("lua breakpoints", "test_lua_breakpoints.py", False),
+    ("lua xrefs",     "test_lua_xrefs.py",      False),
     ("client retry",   "test_client_retry.py",   True),
     ("client jobs",    "test_client_jobs.py",    True),
     ("client analysis", "test_client_analysis.py", True),
@@ -72,7 +73,7 @@ def main():
             rows.append((name, "SKIP", "needs `pip install -r MCP_Server/requirements.txt` (mcp, pywin32)", 0.0))
             skipped += 1
             continue
-        extra = ["--real"] if (args.real and "analysis" in name and filename.startswith("test_lua")) else []
+        extra = ["--real"] if (args.real and ("analysis" in name or "xrefs" in name) and filename.startswith("test_lua")) else []
         code, (p, f, e), out, secs = run_suite(name, filename, extra)
         if code == EXIT_SKIP:
             reason = (out.strip().splitlines() or ["prerequisite missing"])[-1]

@@ -296,13 +296,14 @@ And many more at `AI_Context/MCP_Bridge_Command_Reference.md`
 | `pe_functions` | Exact x64 function boundaries from `.pdata` (also used by `find_function_boundaries`, `analyze_function` and string refs): unwind info, exception handler, split-fragment resolution |
 | `recover_struct` | Class layout from live instance(s) of a polymorphic MSVC class: RTTI name/bases, virtual functions with exact sizes, inferred fields (typed pointers, text, floats, doubles, ints), C declaration and an optional CE structure |
 | `find_string_refs` | Code (`lea reg,[rip+x]`, absolute operands) and data that reference a string, with the function each reference is in |
+| `find_xrefs` | Everything that references an address or a range ("who calls this", "who touches this variable"): calls and jumps (rel32 and short), x64 rip-relative operands classified as read / write / lea / call, absolute pointers in code and data, jump-table RVAs. Hits are validated with the disassembler and grouped by calling function |
 | `find_code_caves` | Runs of `0xCC`/`0x00`/`0x90` padding for patches and hooks |
 | `find_pointer_path` | Reverse pointer search: static `[[module+rva]+o1]+o2` chains that reach a heap address, verified by re-resolving |
 | `snapshot_region`, `diff_snapshots`, `list_snapshots`, `delete_snapshot` | Save memory copies and diff them (`C`hanged / `U`nchanged pattern per pair) for unknown-value hunting without scans |
 | `va_to_rva`, `rva_to_va`, `rebase_address` | Translate between runtime addresses, module+RVA and IDA addresses |
 | `export_names`, `export_structures`, `import_names` | Send CE symbols, RTTI vtables and structure definitions to IDA (JSON, an IDAPython script, C declarations) and bring IDA names back as CE symbols |
 
-The long-running ones (`rtti_scan_module`, `find_string_refs`, `find_code_caves`, `find_pointer_path`) run as background jobs: they wait up to `wait_seconds` and otherwise return a `job_id` for `wait_for_job` / `get_job_result`.
+The long-running ones (`rtti_scan_module`, `find_string_refs`, `find_xrefs`, `find_code_caves`, `find_pointer_path`) run as background jobs: they wait up to `wait_seconds` and otherwise return a `job_id` for `wait_for_job` / `get_job_result`.
 
 ## Critical Configuration
 

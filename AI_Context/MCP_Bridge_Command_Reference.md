@@ -3435,6 +3435,7 @@ All commands below that take `module` accept a module name (case-insensitive; ex
 |------|-----------|--------|
 | `rtti_scan` | `module`, `max_vtable_entries` | `classes[{class_name,raw_name,kind,vtable,vtable_rva,col,this_offset,vfunc_count,bases[]}]`. MSVC RTTI only. Three passes over the non-executable sections: type descriptors, complete object locators, vtables. A non-zero `this_offset` marks a secondary base's vtable |
 | `find_string_refs` | `text`\|`address`, `module`, `wide`, `match` (`start`\|`any`), `include_data` | `string_addresses[]`, `references[{address,kind,target,rva,section,instruction}]`; kinds `rip_lea` (x64 `lea reg,[rip+disp]`), `abs_code`, `abs_data` |
+| `find_xrefs` | `address`, `size`, `module` (name\|`all`), `kinds`, `max_results` | `references[{kind,address,target,rva,section,instruction,access,function_start}]`, `functions[]`, `by_kind{}`; see section 36 |
 | `find_code_caves` | `module`, `byte` (`0xCC`\|`0x00`\|`0x90`), `min_size`, `sections` (`exec`\|`all`) | `caves[{address,size,rva,section}]`, largest first |
 | `find_pointer_path` | `address`, `max_depth` (1-6), `max_offset`, `max_per_level`, `max_results`, `protection` | `chains[{base,offsets,offsets_hex,expression,depth,verified}]`. One value-between memscan per frontier address per level; non-static holders are expanded best-first (smallest accumulated offsets) up to `max_per_level`. `offsets` are outermost first: `base` -> read -> `+offsets[0]` -> read -> ... -> `+offsets[last]` = the address. Re-check chains after a restart with `validate_pointer_chains` |
 
@@ -3479,6 +3480,35 @@ Data breakpoints are validated: `size` must be 1, 2, 4 or 8, the address must be
 Assumption to verify live: CE keeps the thread stopped when a `debug_setBreakpoint` callback returns 0 without calling `debug_continueFromBreakpoint` (documented for `debugger_onBreakpoint`; the offline tests simulate it).
 
 <!-- UNIT-27 end -->
+
+## 36. Cross-References (Unit 28)
+
+`find_xrefs` answers "what references this address?" for code and data in one background job (`start_job` kind `find_xrefs`; the MCP tool of the same name wraps start + wait + result). It supersedes `find_references` / `find_call_references` for static analysis: those scan for one byte pattern in executable memory and cannot tell an instruction from a coincidence.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `address` | Target (hex string, symbol, `module+offset` or integer). Required. |
+| `size` | Treat `[address, address+size)` as the target (default 1, max 65536): a function's first bytes, a whole struct. Absolute pointers **in code** are only searched for sizes up to 16 (a note says so). |
+| `module` | A module name, `"all"`, or empty = the module that contains `address`, else the main module. Modules without a readable PE header are skipped with a note. |
+| `kinds` | Comma separated list or array of `call`, `jmp`, `jcc`, `rip`, `abs` (= `abs_code` + `abs_data`), `abs_code`, `abs_data`, `rva`. Default: all. |
+| `max_results` | Raw-hit cap (default 5000, max 50000). `truncated: true` plus a note when it is reached. |
+
+**Result** (paged with `offset` / `limit` like the other jobs): `target`, `size`, `modules[]`, `found`, `by_kind{}`, `functions[{function_start,function_rva,count}]` (calling functions, most references first, at most 50), optional `truncated` and `notes[]`, and `references[]`:
+
+| Field | Meaning |
+|-------|---------|
+| `kind` | `call`, `jmp`, `jcc` (rel32 or rel8: `form`), `rip` (x64 rip-relative operand), `abs_code` (absolute pointer inside code), `abs_data` (pointer-aligned absolute pointer in a data section), `rva` (aligned 32-bit RVA in data, e.g. a jump table; the `.pdata` exception table is skipped) |
+| `address`, `module`, `rva`, `expression`, `section` | Where the reference is. For `rip` and `abs_code` it is the **instruction**; `abs_code` also has `field_address` (the pointer itself). An `abs_code` hit without `field_address` is a bare pointer inside code (an x86 switch table). |
+| `target`, `offset_in_target` | The address that was reached; with `size > 1` the offset inside the range. |
+| `instruction` | Disassembly of the instruction (code hits). |
+| `access` | `rip` hits only: `read`, `write`, `read/write`, `address` (lea), `call`, `jump`; from the instruction text, so treat it as a strong hint. |
+| `function_start`, `function_rva` | The enclosing function from `.pdata` (x64) when there is one. |
+
+**How hits are validated.** Candidates come from byte patterns, then the disassembler decides. A rip-relative candidate is kept only if the instruction that covers the displacement ends exactly where the displacement says (`U26.insnStart` decodes forward from the function start, or 96 bytes back outside `.pdata`); short jumps must sit on an instruction boundary. Rel32 branches and pointers need no check: a 32/64-bit match is not a coincidence. On the real `msvcp140.dll` and `user32.dll` this agrees with a capstone linear sweep on all 13,080 references of 74 targets (100% recall, no extras).
+
+**Limits.** Static references only: a pointer held in the heap or on the stack is not found (use `find_pointer_path`). Indirect jumps through registers and computed addresses are invisible to any static scan. x86 has no rip-relative operands or `.pdata`; there `rip`/`rva` are ignored and `abs_code` is the main data-reference kind.
+
+Also in this unit: `find_string_refs` no longer misses `lea r12,[rip+x]`. Its hand-written pattern class contained a literal `%` that silently dropped modrm byte 0x25 (reg 4 = `r12`); all pattern classes now come from `U26.byteClass`.
 
 ---
 

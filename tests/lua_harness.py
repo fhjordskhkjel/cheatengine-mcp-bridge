@@ -40,16 +40,53 @@ def _load_lib():
     lib.lua_tolstring.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_size_t)]
     lib.lua_tolstring.restype = ctypes.c_void_p
     lib.lua_close.argtypes = [ctypes.c_void_p]
+    lib.lua_pushcclosure.argtypes = [ctypes.c_void_p, _LUA_CFUNC, ctypes.c_int]
+    lib.lua_setglobal.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    lib.lua_tointegerx.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+    lib.lua_tointegerx.restype = ctypes.c_longlong
+    lib.lua_pushinteger.argtypes = [ctypes.c_void_p, ctypes.c_longlong]
+    lib.lua_pushlstring.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+    lib.lua_pushnil.argtypes = [ctypes.c_void_p]
     return lib
 
 
+_LUA_CFUNC = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
 lib = _load_lib()
 
 
-def run_lua(code, name="chunk", ascii_only=True):
-    """Run `code` in a fresh Lua state. Returns (ok, text) where text is the chunk's string result or its error."""
+def _wrap_callback(fn):
+    """Python function(int address) -> int | str | None, exposed to Lua as a one-argument global function."""
+    def tramp(L):
+        try:
+            res = fn(lib.lua_tointegerx(L, 1, None))
+        except Exception as exc:                    # a callback must never unwind through the Lua VM
+            print("CALLBACK ERROR:", exc)
+            res = None
+        if res is None:
+            lib.lua_pushnil(L)
+        elif isinstance(res, int):
+            lib.lua_pushinteger(L, res)
+        else:
+            raw = str(res).encode("utf-8", "replace")
+            lib.lua_pushlstring(L, raw, len(raw))
+        return 1
+    return _LUA_CFUNC(tramp)
+
+
+def run_lua(code, name="chunk", ascii_only=True, callbacks=None):
+    """Run `code` in a fresh Lua state. Returns (ok, text) where text is the chunk's string result or its error.
+
+    callbacks: {global name: python function(address) -> int | str | None}, available to the chunk as Lua globals
+    (e.g. a real disassembler standing in for CE's getInstructionSize / disassemble).
+    """
     L = lib.luaL_newstate()
     lib.luaL_openlibs(L)
+    keep = []
+    for gname, fn in (callbacks or {}).items():
+        cfn = _wrap_callback(fn)
+        keep.append(cfn)                            # must outlive the state
+        lib.lua_pushcclosure(L, cfn, 0)
+        lib.lua_setglobal(L, gname.encode())
     try:
         data = code.encode("utf-8")
         rc = lib.luaL_loadbufferx(L, data, len(data), name.encode(), None)

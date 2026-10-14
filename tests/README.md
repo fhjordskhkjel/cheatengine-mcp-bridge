@@ -24,6 +24,7 @@ python tests/test_lua_jobs.py        # a single suite (exit code 0 = all passed)
 | `test_lua_robustness.py` | JSON codec (`\u` escapes, int64 numbers, invalid UTF-8), `executeCommand` never throwing, breakpoint-hit recording and the callback that must always resume the target |
 | `test_lua_jobs.py` | `read_memory` formats, `read_struct`, `batch`, `bridge_status`, and the async job system (scan jobs, poll fallback, cancel, caps, cleanup) |
 | `test_lua_analysis.py` | PE imports/exports/TLS, RVA/IDA translation, RTTI, string refs, code caves, pointer paths, snapshots, `export_names`/`import_names`/`export_structures`, on synthetic x64 **and** x86 images |
+| `test_lua_xrefs.py` | `find_xrefs`: calls/jumps (rel32, rel8, across chunk borders), rip-relative operands and their read/write classification, absolute pointers, RVAs and the `.pdata` exclusion, ranges, module selection, limits, on synthetic x64 and x86 images with a fake instruction decoder |
 | `test_client_retry.py` | The Python client against a fake bridge on a real named pipe: no double execution of state-changing commands, reconnect backoff, timeouts that must not hang, bad UTF-8, RPC errors |
 | `test_client_jobs.py` | UNIT-25 MCP tools: parameter forwarding, `wait_for_job`, `batch_commands` retry policy |
 | `test_client_analysis.py` | UNIT-26 MCP tools: parameter cleaning, job wrappers (`wait_seconds` / `timed_out`), tool registration and schemas |
@@ -33,6 +34,15 @@ loaded in the test process and cross-checks them with Windows itself: every expo
 resolved import against `GetProcAddress` of the imported function, section flags against `VirtualQuery`, and the RTTI
 scan against the known `std::` exception classes. (Some `user32` exports are redirected by Windows' app-compat shims;
 those are skipped because `GetProcAddress` no longer returns the module's own export.)
+
+`test_lua_xrefs.py --real` checks `find_xrefs` against an independent oracle (`pip install capstone`): capstone
+linear-sweeps the code of `msvcp140.dll` and `user32.dll` function by function and lists every direct branch and
+rip-relative operand with the address it reaches. The bridge job then runs on the same bytes (capstone also answers
+its `disassemble` / `getInstructionSize` calls, as CE's disassembler would, through `run_lua(callbacks=...)`) for the
+most-referenced and some rarely-referenced targets plus one 64-byte range, and the two sets of instruction addresses
+must be identical. Without capstone this part is skipped.
+
+Shared fake CE API for the suites that run synthetic PE images: `fake_ce.py` (`STUBS`, `HELPERS`).
 
 ## Mutation check
 `mutation_check.py` applies one small plausible bug at a time to a copy of `ce_mcp_bridge.lua` and requires the

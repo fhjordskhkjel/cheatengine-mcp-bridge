@@ -20,6 +20,7 @@ TESTS = Path(__file__).resolve().parent
 
 ROBUST, JOBS, ANALYSIS = "test_lua_robustness.py", "test_lua_jobs.py", "test_lua_analysis.py"
 BREAKPOINTS = "test_lua_breakpoints.py"
+XREFS = "test_lua_xrefs.py"
 
 # (name, suite, old text, new text, expected) - expected "caught" unless the bug cannot change any observable result
 MUTANTS = [
@@ -83,6 +84,32 @@ MUTANTS = [
     ("bp_outside_resume_not_noticed", BREAKPOINTS, "    if okB and not broken and not grace then", "    if false then", "caught"),
     ("bp_remove_does_not_resume", BREAKPOINTS, '        if serverState.halted and serverState.halted.id == bpId then BPX.resume("breakpoint removed") end', "", "caught"),
     ("bp_break_ignores_already_halted", BREAKPOINTS, "    if bp.mode == \"break\" and not serverState.halted then", "    if bp.mode == \"break\" then", "caught"),
+    # --- UNIT-28 (cross-references)
+    ("string_ref_modrm_class_loses_r12", ANALYSIS, "0x1D, 0x25, 0x2D, 0x35, 0x3D })   -- mod=00 rm=101 for every reg value", "0x1D, 0x2D, 0x35, 0x3D })   -- mod=00 rm=101 for every reg value", "caught"),
+    ("xref_modrm_class_loses_r12", XREFS, "0x1D, 0x25, 0x2D, 0x35, 0x3D })   -- mod=00 rm=101 for every reg value", "0x1D, 0x2D, 0x35, 0x3D })   -- mod=00 rm=101 for every reg value", "caught"),
+    ("byte_class_does_not_escape_punctuation", XREFS, 't[i] = c:match("%p") and ("%" .. c) or c', "t[i] = c", "caught"),
+    ("xref_false_rip_candidates_kept", XREFS, "if not start then return nil end", "if not start then start = r.addr end", "caught"),
+    ("xref_resync_starts_at_the_field", XREFS, "    local from = fieldStart - U26.XREF_RUNWAY\n    if floor then", "    local from = fieldStart - 1\n    if floor then", "caught"),
+    ("xref_function_floor_ignored", XREFS, "if floor then from = math.max(floor, fieldStart - U26.XREF_RUNWAY_FROM_FUNCTION) end", "if false then from = math.max(floor, fieldStart - U26.XREF_RUNWAY_FROM_FUNCTION) end", "caught"),
+    ("xref_function_floor_not_passed", XREFS, "local floor = fn and (mod.base + fn.primary.begin_rva) or nil", "local floor = nil", "caught"),
+    ("xref_decoder_disagreement_accepted", XREFS, "if finish == e then return pos, e - pos end", "return pos, finish - pos", "caught"),
+    ("xref_short_jump_boundary_unchecked", XREFS, 'if r.form == "rel8" and not U26.atBoundary(r.addr, floor) then return nil end', "if false then return nil end", "caught"),
+    ("xref_short_jumps_missed", XREFS, "if want.jmp or want.jcc then\n                -- short jumps", "if false then\n                -- short jumps", "caught"),
+    ("xref_pdata_rvas_reported", XREFS, 'if r.name ~= ".pdata" then ranges[#ranges + 1] = r end', "if true then ranges[#ranges + 1] = r end", "caught"),
+    ("xref_unaligned_pointers_reported", XREFS, 'if a % P == 0 then add(mod, pe, a, "abs_data", nd.t) end', 'add(mod, pe, a, "abs_data", nd.t)', "caught"),
+    ("xref_unaligned_rvas_reported", XREFS, 'if a % 4 == 0 then add(mod, pe, a, "rva", nd.t) end', 'add(mod, pe, a, "rva", nd.t)', "caught"),
+    ("xref_code_carry_removed", XREFS, "stages[#stages + 1] = { ranges = execRanges, carry = 7, process = function(jb, data, dbase)", "stages[#stages + 1] = { ranges = execRanges, carry = 0, process = function(jb, data, dbase)", "caught"),
+    ("xref_duplicates_not_filtered", XREFS, "        if seen[key] then return end\n        if #recs >= maxResults", "        if #recs >= maxResults", "caught"),
+    ("xref_range_offset_missing", XREFS, "if st.size > 1 then item.offset_in_target = r.target - st.lo end", "if false then item.offset_in_target = r.target - st.lo end", "caught"),
+    ("xref_range_ignored", XREFS, "hiEx = target + size, exact = size <= U26.XREF_NEEDLE_LIMIT", "hiEx = target + 1, exact = size <= U26.XREF_NEEDLE_LIMIT", "caught"),
+    ("xref_truncation_unflagged", XREFS, "if st.ctx.truncated then fields.truncated = true;", "if false then fields.truncated = true;", "caught"),
+    ("xref_memory_source_taken_for_destination", XREFS, 'if comma and br > comma then return "read" end', "", "caught"),
+    ("xref_access_not_reported", XREFS, 'if r.kind == "rip" then item.access = U26.xrefAccess(text) end', "", "caught"),
+    ("xref_default_module_is_always_main", XREFS, "picked = { U26.moduleFor(mods, target) or mods[1] }", "picked = { mods[1] }", "caught"),
+    ("xref_function_not_reported", XREFS, '        if fn then\n            item.function_start = mod.name .. "+" .. U26.hex(fn.primary.begin_rva)\n            item.function_rva = fn.primary.begin_rva\n        end\n    end\n    return item, addr',
+     '        if false then\n            item.function_start = mod.name .. "+" .. U26.hex(fn.primary.begin_rva)\n            item.function_rva = fn.primary.begin_rva\n        end\n    end\n    return item, addr', "caught"),
+    ("xref_code_pointer_keeps_no_instruction", XREFS, "        if start then\n            addr = start\n            item.field_address = U26.hex(r.addr)", "        if false then\n            addr = start\n            item.field_address = U26.hex(r.addr)", "caught"),
+    ("xref_trailing_immediate_ignored", XREFS, "for i, e in ipairs(U26.XREF_IMMS) do ends[i] = r.addr + r.width + e end", "for i, e in ipairs(U26.XREF_IMMS) do ends[i] = r.addr + r.width end", "caught"),
     # Defensive only: a false x86 locator is harmless unless something points at it, so no result changes.
     ("x86_locator_sanity_check_removed", ANALYSIS, "ok = nb >= 1 and nb <= 64 and arr >= mod.base and arr < mod.base + mod.size", "ok = true", "survives"),
 ]
