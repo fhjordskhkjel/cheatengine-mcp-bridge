@@ -218,6 +218,25 @@ def main():
                                     {"method": "read_integer", "params": {"address": hx(obj)}}])
         check("batch_commands runs both requests", b.get("executed") == 2 and b.get("failed") == 0, b)
 
+    if section("patch journal"):
+        spot = scratch + 0x300                                    # the throwaway target's scratch buffer: nothing reads it
+        call(m.write_memory, hx(spot), [0x11, 0x22, 0x33, 0x44])
+        w = call(m.write_memory, hx(spot), [0xAA, 0xBB])
+        check("a write returns a patch id", w.get("success") and str(w.get("patch_id", "")).startswith("p"), w)
+        lp = call(m.list_patches, limit=5)
+        entry = next((p for p in lp.get("patches", []) if p.get("id") == w.get("patch_id")), {})
+        check("list_patches shows the replaced bytes and state=applied", entry.get("original") == "11 22" and entry.get("written") == "AA BB"
+              and entry.get("state") == "applied", entry)
+        u = call(m.undo_patch, w.get("patch_id"))
+        check("undo_patch restores the original bytes in the real target", u.get("success") and rawbytes(call(m.read_memory, hx(spot), 4))[:4] == bytes([0x11, 0x22, 0x33, 0x44]), u)
+        w2 = call(m.write_memory, hx(spot), [0x55])
+        call(m.write_integer, hx(spot), 0x77, "byte")             # something else writes over the patch
+        c = call(m.undo_patch, w2.get("patch_id"))
+        check("an undo over changed bytes is refused (conflict)", c.get("success") is False and c.get("conflict") is True, c)
+        f = call(m.undo_patch, w2.get("patch_id"), force=True)
+        check("force=true restores anyway", f.get("success") and rawbytes(call(m.read_memory, hx(spot), 1))[:1] == bytes([0x11]), f)
+        call(m.undo_patch, all=True)
+
     if section("scan jobs"):
         magic = str(0xC0FFEE11)
         def session_addresses():

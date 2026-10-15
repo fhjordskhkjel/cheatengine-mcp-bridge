@@ -29,6 +29,7 @@ SUITES = [
     ("lua breakpoints", "test_lua_breakpoints.py", False),
     ("lua xrefs",     "test_lua_xrefs.py",      False),
     ("lua pathsets",  "test_lua_pathsets.py",   False),
+    ("lua patches",   "test_lua_patches.py",    False),
     ("lua load",      "test_lua_load.py",       False),
     ("client retry",   "test_client_retry.py",   True),
     ("client jobs",    "test_client_jobs.py",    True),

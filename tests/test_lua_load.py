@@ -38,10 +38,11 @@ SKIP = {"run_command", "shell_execute", "delete_file", "write_region_to_file", "
 OWN = {"bridge_status", "read_struct", "batch", "start_job", "get_job", "get_job_result", "cancel_job", "list_jobs", "pe_info", "pe_imports",
        "pe_exports", "pe_tls_callbacks", "va_to_rva", "rva_to_va", "rebase_address", "export_names", "export_structures", "import_names",
        "snapshot_region", "list_snapshots", "delete_snapshot", "diff_snapshots", "pe_functions", "recover_struct", "get_halted_state",
-       "set_breakpoint", "set_data_breakpoint", "remove_breakpoint", "list_breakpoints", "get_breakpoint_hits", "clear_all_breakpoints"}
+       "set_breakpoint", "set_data_breakpoint", "remove_breakpoint", "list_breakpoints", "get_breakpoint_hits", "clear_all_breakpoints",
+       "compare_pointer_paths", "list_pointer_sets", "get_pointer_set", "drop_pointer_set", "list_patches", "undo_patch"}
 # of those, the ones that need an attached process and must say so
 NEEDS_PROCESS = {"read_struct", "pe_info", "pe_imports", "pe_exports", "pe_tls_callbacks", "pe_functions", "recover_struct", "snapshot_region",
-                 "set_breakpoint", "set_data_breakpoint"}
+                 "set_breakpoint", "set_data_breakpoint", "compare_pointer_paths", "undo_patch"}
 
 FAKE = r'''
 local _unique = 0
@@ -178,5 +179,24 @@ print("-- dispatch without a process")
 for n in sorted(NEEDS_PROCESS):
     r = no_proc.get(n, {}).get("result", {})
     print(("PASS  " if isinstance(r, dict) and r.get("error_code") == "NO_PROCESS" else "FAIL  ") + "%s without a process: NO_PROCESS%s" % (n, "" if isinstance(r, dict) and r.get("error_code") == "NO_PROCESS" else "  " + str(r)[:120]))
+
+# the real dispatcher table journals writes (U26.pjWrap is applied to it, so batch() is covered as well)
+code = (FAKE % {"pid": 4242, "run": "true"} + "\nfunction writeBytes() return true end\nfunction readBytes(a, n) return { 1, 2 } end\n"
+        + "BRIDGE_SOURCE = " + lua_long(src) + "\n" + BRIDGE
+        + "FEED('write_memory', '{\"address\":4096,\"bytes\":[7,8]}')\n"
+        + "FEED('batch', '{\"requests\":[{\"method\":\"write_memory\",\"params\":{\"address\":8192,\"bytes\":[9]}}]}')\n"
+        + "FEED('list_patches', '{}')\nbridge_chunk()\nreturn table.concat(RESPONSES, '\\n')\n")
+ok, text = run_lua(code, "journal", ascii_only=False)
+rep = {}
+for line in text.split("\n") if ok else []:
+    try:
+        r = json.loads(line)
+        rep[r.get("id")] = r.get("result", {})
+    except ValueError:
+        pass
+print("-- patch journal wiring")
+print(("PASS  " if rep.get("write_memory", {}).get("patch_id") == "p1" else "FAIL  ") + "write_memory through the real dispatcher returns a patch id  " + str(rep.get("write_memory"))[:160])
+print(("PASS  " if (rep.get("batch", {}).get("results") or [{}])[0].get("patch_id") == "p2" else "FAIL  ") + "a write inside batch is journaled  " + str(rep.get("batch"))[:160])
+print(("PASS  " if rep.get("list_patches", {}).get("total") == 2 else "FAIL  ") + "list_patches sees both  " + str(rep.get("list_patches"))[:160])
 
 finish()

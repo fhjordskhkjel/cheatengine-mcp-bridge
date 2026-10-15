@@ -3146,6 +3146,32 @@ def drop_pointer_set(name: str = "", all: bool = False) -> str:
 
 # >>> END UNIT-30 <<<
 
+# >>> BEGIN UNIT-31 Patch journal and undo <<<
+
+@mcp.tool()
+def list_patches(active_only: bool = False, offset: int = 0, limit: int = 50) -> str:
+    """The patch journal: every write made through write_memory, write_integer, write_string, copy_memory (with a dest)
+    and auto_assemble, newest first, with the bytes it replaced and a live `state`:
+    applied (still in memory) | changed (something wrote over it since) | undone | not_undoable (see `reason`) |
+    other_process (made before the target restarted) | unreadable. Each write tool's reply carries its `patch_id`.
+    Not journaled: memory records, kernel/physical writes, injected code. The journal is lost when the bridge reloads."""
+    return format_result(ce_client.send_command("list_patches", _params(active_only=active_only or None, offset=offset or None, limit=limit)))
+
+
+@mcp.tool()
+def undo_patch(id: str = "", all: bool = False, force: bool = False) -> str:
+    """Undo a journaled write: put the original bytes back (an auto_assemble patch runs its script's [DISABLE] section).
+
+    Args:
+        id: The patch id ("p12") from a write tool's reply or list_patches.
+        all: Undo every active patch of the current process instead, newest first (so stacked patches unwind cleanly).
+        force: Restore even if the bytes changed since the patch (by the game, another tool or a later patch). Without
+               it such an undo is refused with conflict=true, so a newer patch is never silently torn out underneath.
+    """
+    return format_result(ce_client.send_command("undo_patch", _params(id=id, all=all or None, force=force or None)))
+
+# >>> END UNIT-31 <<<
+
 # >>> BEGIN UNIT-29 Capability profiles and tool groups <<<
 
 ALL_TOOLS = sorted(t.name for t in mcp._tool_manager.list_tools()) + ["policy_info"]

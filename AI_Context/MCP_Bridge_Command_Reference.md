@@ -3440,7 +3440,7 @@ All commands below that take `module` accept a module name (case-insensitive; ex
 | `find_string_refs` | `text`\|`address`, `module`, `wide`, `match` (`start`\|`any`), `include_data` | `string_addresses[]`, `references[{address,kind,target,rva,section,instruction}]`; kinds `rip_lea` (x64 `lea reg,[rip+disp]`), `abs_code`, `abs_data` |
 | `find_xrefs` | `address`, `size`, `module` (name\|`all`), `kinds`, `max_results` | `references[{kind,address,target,rva,section,instruction,access,function_start}]`, `functions[]`, `by_kind{}`; see section 36 |
 | `find_code_caves` | `module`, `byte` (`0xCC`\|`0x00`\|`0x90`), `min_size`, `sections` (`exec`\|`all`) | `caves[{address,size,rva,section}]`, largest first |
-| `find_pointer_path` | `address`, `max_depth` (1-6), `max_offset`, `max_per_level`, `max_results`, `protection`, `save_as` | `chains[{base,offsets,offsets_hex,expression,depth,verified}]`, plus `saved_as` + `set{}` (or `save_note`) when `save_as` names a pointer set (section 38). One value-between memscan per frontier address per level; non-static holders are expanded best-first (smallest accumulated offsets) up to `max_per_level`. `offsets` are outermost first: `base` -> read -> `+offsets[0]` -> read -> ... -> `+offsets[last]` = the address. Re-check chains after a restart with `compare_pointer_paths` (section 38) or `validate_pointer_chains` |
+| `find_pointer_path` | `address`, `max_depth` (1-6), `max_offset`, `max_per_level`, `max_results`, `protection`, `save_as` | `chains[{base,offsets,offsets_hex,expression,depth,verified}]`, plus `saved_as` + `set{}` (or `save_note`) when `save_as` names a pointer set (section 38). Value-between memscans level by level; holders within 64 KB of each other share one scan (`holders_searched` vs `scans` shows the saving); non-static holders are expanded best-first (smallest accumulated offsets) up to `max_per_level`. `offsets` are outermost first: `base` -> read -> `+offsets[0]` -> read -> ... -> `+offsets[last]` = the address. Re-check chains after a restart with `compare_pointer_paths` (section 38) or `validate_pointer_chains` |
 
 The MCP tools `rtti_scan_module`, `find_string_refs`, `find_code_caves` and `find_pointer_path` wrap `start_job` + wait + `get_job_result`.
 
@@ -3564,6 +3564,26 @@ A pointer chain that works in one run is only useful if it works after the targe
 **Set management:** `list_pointer_sets` (name, `chain_count`, `runs`, `arch`, `created`, `updated`, `history[]`), `get_pointer_set(name, offset, limit)` (the chains plus the history) and `drop_pointer_set(name | all)`. History entries are `{run, at, pid, process, target, tested, survivors, source}` (`source`: `find_pointer_path`, `compare` or `inline`); only the last 20 are kept.
 
 **Limits.** 16 sets, 5000 chains per set, 16 offsets per chain, names of letters/digits/`_.-` up to 48 characters. Sets live in bridge memory: they survive target restarts, not a reload of `ce_mcp_bridge.lua` or closing CE; copy chains out with `get_pointer_set` when they matter. The comparison tests chains, it does not search: a chain that `find_pointer_path` did not find in run 1 (it is a capped reverse scan) cannot be confirmed later.
+
+---
+
+## 39. Patch Journal and Undo (Unit 31)
+
+Every write made through the bridge's own write tools is journaled with the bytes it replaced, so an AI client's patches can be listed and taken back. The journal wraps the handlers inside the dispatcher table, so writes sent through `batch` are covered too.
+
+| Tool that writes | What is recorded |
+|------------------|------------------|
+| `write_memory`, `write_integer` (1/2/4/8 bytes by `type`), `write_string` (no terminator; 2 bytes per character with `wide`) | the overwritten bytes, read just before the write |
+| `copy_memory` with `dest` | the destination bytes (without `dest` the copy goes into fresh memory: nothing to record) |
+| `auto_assemble` | the script and Cheat Engine's disable info; undone by running the script's `[DISABLE]` section |
+
+The reply of a journaled write carries `patch_id` (and `patch_note` when the entry cannot be undone). Not journaled: memory-record writes, kernel/physical (`*_cr3`, DBK) writes, injected or executed code, memory allocations.
+
+**`list_patches(active_only, offset, limit)`**: newest first, `{id, method, kind (bytes|script), address, expression, size, original, written (hex, first 64 bytes), at, pid, state, undoable, reason}` plus `dropped` when old entries were discarded. `state` is computed live: `applied`, `changed` (something wrote over the patch since), `undone`, `not_undoable`, `other_process` (made in an earlier instance of the target), `unreadable`.
+
+**`undo_patch(id | all, force)`**: restores the original bytes and reads them back to verify (`"did not stick"` otherwise). Refused with a reason when the patch is already undone, belongs to another pid, cannot be undone, or when the current bytes differ from what the patch wrote (`conflict: true`; a later patch, the game or another tool changed them). `force=true` restores anyway. `all=true` undoes every active patch of the current process newest first, so stacked patches on the same bytes unwind in the right order, and reports each result.
+
+**Limits.** 500 entries and 16 MB (oldest dropped first); a single write over 64 KB is listed but its original is not kept. The journal lives in bridge memory and is lost when the script is reloaded.
 
 ---
 

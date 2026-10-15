@@ -379,6 +379,35 @@ eq("too-small max_offset finds nothing", r.found, 0)
 r = runJob("find_pointer_path", { address = GB + 0x3600 })
 eq("already-static target answers immediately", r.found == 1 and r.chains[1].base == "game.exe+0x3600" and #r.chains[1].offsets == 0, true)
 eq("pointer path bad address", cmd_start_job({ kind = "find_pointer_path", params = { address = "zzz" } }).error_code, "INVALID_ADDRESS")
+-- holders close together share one memscan; a distant one gets its own
+local T2 = 0x3A000100
+PTR_MODEL = {
+  [0x3B000010] = T2 - 0x20, [0x3B000400] = T2 - 0x40, [0x3B000480] = T2 - 0x50, [0x3B000800] = T2 - 0x60,   -- level 1: four holders near each other
+  [0x4C000000] = T2 - 0x80,                                                                                 -- ... and one far away
+  [GB + 0x3700] = 0x3B000000, [GB + 0x3708] = 0x3B000400, [GB + 0x3710] = 0x3B000700, [GB + 0x3718] = 0x4C000000 - 8,
+  [0x3D000000] = 0x3B0003F0,                     -- a heap holder inside the windows of BOTH 0x3B000400 (+0x10) and 0x3B000480 (+0x90)
+  [GB + 0x3720] = 0x3D000000,
+}
+for loc, val in pairs(PTR_MODEL) do putPtr(loc, val) end
+local scansBefore = #SCANS
+r = runJob("find_pointer_path", { address = T2, max_depth = 3, max_offset = 0x200 })
+local got = {}
+for _, ch in ipairs(r.chains or {}) do
+  local o = {}
+  for k, v in ipairs(ch.offsets) do o[k] = string.format("%%X", v) end
+  got[#got + 1] = ch.base .. ":" .. table.concat(o, "/")
+end
+table.sort(got)
+eq("merged scans find every chain", table.concat(got, " "),
+   "game.exe+0x3700:10/20 game.exe+0x3708:0/40 game.exe+0x3708:80/50 game.exe+0x3710:100/60 game.exe+0x3718:8/80 game.exe+0x3720:0/10/40")
+eq("one scan per cluster: 1 + 2 + 1 instead of 1 + 5 + 1", r.scans == 4 and #SCANS - scansBefore == 4 and r.holders_searched == 7, true)
+eq("a holder serving two targets keeps its cheapest chain", table.concat(got, " "):find("0/90/50", 1, true), nil)
+eq("every merged chain verifies", (function() for _, ch in ipairs(r.chains) do if not ch.verified then return false end end return true end)(), true)
+local cl = U26.ppClusters({ { t = 0x1000 }, { t = 0x50000 }, { t = 0x1200 }, { t = 0x50000 + U26.PP_MERGE_GAP } }, 0x100)
+eq("clusters: sorted, merged within the gap, split beyond it", #cl == 2 and #cl[1].entries == 2 and cl[1].entries[1].t == 0x1000 and cl[1].lo == 0xF00 and cl[1].hi == 0x1200
+   and #cl[2].entries == 2, true)
+cl = U26.ppClusters({ { t = 0x100000 }, { t = 0x100000 + U26.PP_MAX_SPAN + 0x10 } }, U26.PP_MERGE_GAP * 300)
+eq("clusters: the value span is capped", #cl, 2)
 -- scan parameters used
 local lastMs = SCANS[#SCANS]
 PTR_MODEL = nil

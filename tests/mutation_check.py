@@ -22,6 +22,7 @@ ROBUST, JOBS, ANALYSIS = "test_lua_robustness.py", "test_lua_jobs.py", "test_lua
 BREAKPOINTS = "test_lua_breakpoints.py"
 XREFS = "test_lua_xrefs.py"
 PATHSETS = "test_lua_pathsets.py"
+PATCHES = "test_lua_patches.py"
 LOAD = "test_lua_load.py"
 
 # (name, suite, old text, new text, expected) - expected "caught" unless the bug cannot change any observable result
@@ -45,8 +46,13 @@ MUTANTS = [
     ("string_ref_carry_removed", ANALYSIS, "stages[#stages + 1] = { ranges = codeRanges, carry = 7, onStart", "stages[#stages + 1] = { ranges = codeRanges, carry = 0, onStart", "caught"),
     ("cave_run_not_continued_across_chunks", ANALYSIS, 'if run.nextAddr == dbase then\n                local s, e = data:find("^" .. pat)', 'if false then\n                local s, e = data:find("^" .. pat)', "caught"),
     ("cave_at_section_end_dropped", ANALYSIS, "stages = { { ranges = ranges, onDone = closeRun,", "stages = { { ranges = ranges,", "caught"),
-    ("pointer_offsets_in_wrong_order", ANALYSIS, "local offs, cost = { entry.t - val }, entry.t - val\n                for _, o in ipairs(entry.offs) do offs[#offs + 1] = o; cost = cost + o end",
-     "local offs, cost = {}, entry.t - val\n                for _, o in ipairs(entry.offs) do offs[#offs + 1] = o; cost = cost + o end\n                offs[#offs + 1] = entry.t - val", "caught"),
+    ("pointer_offsets_in_wrong_order", ANALYSIS, "local offs, cost = { entry.t - val }, entry.t - val\n                    for _, o in ipairs(entry.offs) do offs[#offs + 1] = o; cost = cost + o end",
+     "local offs, cost = {}, entry.t - val\n                    for _, o in ipairs(entry.offs) do offs[#offs + 1] = o; cost = cost + o end\n                    offs[#offs + 1] = entry.t - val", "caught"),
+    ("pointer_holders_never_share_a_scan", ANALYSIS, "if cur and lo <= cur.hi + U26.PP_MERGE_GAP and", "if false and lo <= cur.hi + U26.PP_MERGE_GAP and", "caught"),
+    ("pointer_cluster_span_uncapped", ANALYSIS, " and e.t - cur.lo <= U26.PP_MAX_SPAN then", " then", "caught"),
+    ("pointer_result_matched_to_one_holder_only", ANALYSIS, "                    k = k + 1\n", "                    k = #es + 1\n", "caught"),
+    ("pointer_holder_search_skips_exact_value", ANALYSIS, "if entries[mid].t < val then lo = mid + 1 else hi = mid - 1 end", "if entries[mid].t <= val then lo = mid + 1 else hi = mid - 1 end", "caught"),
+    ("pointer_shared_holder_keeps_latest_chain", ANALYSIS, "if not prev or cost < prev.cost then st.best[loc]", "if true then st.best[loc]", "caught"),
     ("diff_ignores_unchanged_pairs", ANALYSIS, 'if (pc[k] == "C" and same) or (pc[k] == "U" and not same) then ok = false; break end', 'if (pc[k] == "C" and same) then ok = false; break end', "caught"),
     ("export_forwarders_undetected", ANALYSIS, "local function isForwarder(rva) return rva >= dir.rva and rva < dir.rva + dir.size end", "local function isForwarder(rva) return false end", "caught"),
     ("rtti_base_classes_dropped", ANALYSIS, "for i = 0, math.min(nb, 64) - 1 do", "for i = 0, -1 do", "caught"),
@@ -137,6 +143,25 @@ MUTANTS = [
     ("ps_fractional_offsets_accepted", PATHSETS, 'if math.type(v) == "float" then return math.tointeger(v) end', 'if math.type(v) == "float" then return v end', "caught"),
     ("ps_unreadable_pointer_read_as_null", PATHSETS, 'if not ptr then return "unreadable" end', "if not ptr then ptr = 0 end", "caught"),
     ("ps_found_set_starts_at_run_zero", PATHSETS, "return U26.psPut(name, recs, 1, { {", "return U26.psPut(name, recs, 0, { {", "caught"),
+    # --- UNIT-31 (patch journal and undo)
+    ("pj_journal_not_wired_into_dispatcher", LOAD, "U26.pjWrap(commandHandlers)", "", "caught"),
+    ("pj_original_read_after_the_write", PATCHES, "    if addr and size and size <= U26.PJ_MAX_BYTES then before = U26.rd(addr, size) end\n    serverState.aa_last = nil\n    local res = handler(params)",
+     "    serverState.aa_last = nil\n    local res = handler(params)\n    if addr and size and size <= U26.PJ_MAX_BYTES then before = U26.rd(addr, size) end", "caught"),
+    ("pj_failed_writes_journaled", PATCHES, 'if type(res) ~= "table" or res.success ~= true then return res end', 'if type(res) ~= "table" then return res end', "caught"),
+    ("pj_wide_string_size_halved", PATCHES, "p.wide and 2 * (utf8.len(s) or #s) or #s", "#s", "caught"),
+    ("pj_integer_size_wrong", PATCHES, "write_integer = function(p) return U26.addr(p.address), U26.PJ_SIZES[p.type or \"dword\"] end", "write_integer = function(p) return U26.addr(p.address), 8 end", "caught"),
+    ("pj_conflicts_overwritten", PATCHES, "if cur ~= e.written and not force then", "if false then", "caught"),
+    ("pj_undo_not_verified", PATCHES, 'if U26.rd(e.address, e.size) ~= e.original then out.reason = "the original bytes did not stick (write-protected?)"; return out end', "", "caught"),
+    ("pj_undo_twice_allowed", PATCHES, 'if e.undone then out.reason = "already undone"; return out end', "", "caught"),
+    ("pj_other_process_undone", PATCHES, "    if e.pid ~= pid then\n        out.reason = \"made in another process", "    if false then\n        out.reason = \"made in another process", "caught"),
+    ("pj_undo_all_oldest_first", PATCHES, "        local list = serverState.patches\n        for i = #list, 1, -1 do\n            local e = list[i]\n            if not e.undone and e.pid == pid",
+     "        local list = serverState.patches\n        for i = 1, #list do\n            local e = list[i]\n            if not e.undone and e.pid == pid", "caught"),
+    ("pj_script_undo_without_disable_info", PATCHES, "pcall(autoAssemble, e.script, e.disable_info)", "pcall(autoAssemble, e.script)", "caught"),
+    ("pj_script_without_disable_marked_undoable", PATCHES, 'if not hasDisable then\n            entry.undoable, entry.reason = false, "the script has no [DISABLE] section"', 'if false then\n            entry.undoable, entry.reason = false, "the script has no [DISABLE] section"', "caught"),
+    ("pj_aa_info_not_handed_over", PATCHES, "        serverState.aa_last = { script = script, info = disableInfo }", "", "caught"),
+    ("pj_journal_unbounded", PATCHES, "while #list > U26.PJ_MAX_ENTRIES or", "while false or", "caught"),
+    ("pj_big_write_kept", PATCHES, "if addr and size and size <= U26.PJ_MAX_BYTES then before", "if addr and size then before", "caught"),
+    ("pj_list_oldest_first", PATCHES, "    for i = #list, 1, -1 do                                -- newest first", "    for i = 1, #list do", "caught"),
     # --- whole-file behaviour (the live smoke test found both of these)
     ("requireprocess_shadowed_by_the_boolean_variant", LOAD, "local function requireProcessBool()\n    local pid = getOpenedProcessID()\n    return pid and pid > 0\nend", "local function requireProcess()\n    local pid = getOpenedProcessID()\n    return pid and pid > 0\nend", "caught"),
     ("reload_leaves_the_previous_instance_running", LOAD, 'if type(StopMCPBridge) == "function" then\n    local okPrev', 'if false then\n    local okPrev', "caught"),

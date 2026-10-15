@@ -2433,6 +2433,7 @@ function cmd_auto_assemble(params)
     local success, disableInfo = autoAssemble(script)
     
     if success then
+        serverState.aa_last = { script = script, info = disableInfo }     -- picked up by the patch journal (UNIT-31)
         local result = {
             success = true,
             executed = true
@@ -7982,8 +7983,43 @@ end
 
 -- ---------------------------------------------------------------------------
 -- job: find_pointer_path  (reverse pointer search: which static [[base]+o1]+o2... reaches an address)
--- One value-between memscan per frontier address per level (CE has no scripted pointer scanner).
+-- CE has no scripted pointer scanner, so every level runs value-between memscans: "which aligned pointers hold a
+-- value in [holder - max_offset, holder]". A memscan always walks the whole process, so it is the expensive part.
+-- Holders that lie close together share ONE scan over the union of their windows (U26.ppClusters); each result is
+-- then matched back to every holder whose window contains its value.
 -- ---------------------------------------------------------------------------
+U26.PP_MERGE_GAP, U26.PP_MAX_SPAN = 0x10000, 0x1000000
+
+-- frontier entries -> clusters {lo, hi, entries sorted by t}. Windows [t - maxOffset, t] closer than PP_MERGE_GAP are
+-- merged while the merged value range stays below PP_MAX_SPAN (a wider range only adds results nobody asked for).
+function U26.ppClusters(frontier, maxOffset)
+    local order = {}
+    for i, e in ipairs(frontier) do order[i] = e end
+    table.sort(order, function(a, b) return a.t < b.t end)
+    local clusters, cur = {}, nil
+    for _, e in ipairs(order) do
+        local lo = math.max(1, e.t - maxOffset)
+        if cur and lo <= cur.hi + U26.PP_MERGE_GAP and e.t - cur.lo <= U26.PP_MAX_SPAN then
+            cur.hi = math.max(cur.hi, e.t)
+            cur.entries[#cur.entries + 1] = e
+        else
+            cur = { lo = lo, hi = e.t, entries = { e } }
+            clusters[#clusters + 1] = cur
+        end
+    end
+    return clusters
+end
+
+-- index of the first entry (sorted by t) with t >= val
+function U26.ppFirstAtOrAbove(entries, val)
+    local lo, hi = 1, #entries
+    while lo <= hi do
+        local mid = (lo + hi) // 2
+        if entries[mid].t < val then lo = mid + 1 else hi = mid - 1 end
+    end
+    return lo
+end
+
 JOB_STARTERS.find_pointer_path = function(job, p)
     local target = U26.addr(p.address)
     if not target then return U26.err("Invalid address", "INVALID_ADDRESS") end
@@ -8000,7 +8036,9 @@ JOB_STARTERS.find_pointer_path = function(job, p)
         if nerr then return nerr end
     end
     local mods = U26.listModules()
-    local st = { frontier = { { t = target, offs = {} } }, qi = 1, depth = 1, nextc = {}, found = {}, scans = 0, truncated = false, seen = {} }
+    local st = { frontier = { { t = target, offs = {}, cost = 0 } }, ci = 1, depth = 1, best = {}, found = {}, scans = 0, searched = 0,
+                 truncated = false, seen = { [target] = true } }
+    st.clusters = U26.ppClusters(st.frontier, maxOffset)
     local onScan
 
     local function chainExpression(base, offs)
@@ -8034,7 +8072,7 @@ JOB_STARTERS.find_pointer_path = function(job, p)
         end
         j.progress = { current = st.scans, total = math.max(st.scans, 1) }
         local fields = { target = U26.hex(target), arch = is64 and "x64" or "x86", max_depth = maxDepth, max_offset = maxOffset,
-                         scans = st.scans, truncated = st.truncated, found = #items,
+                         scans = st.scans, holders_searched = st.searched, truncated = st.truncated, found = #items,
                          hint = "After the target restarts, find the same value again and run compare_pointer_paths(name=<set>, target=<new address>); " ..
                                 "pass save_as here to keep these chains in a set. (validate_pointer_chains takes the chains inline.)" }
         if p.save_as ~= nil then
@@ -8050,37 +8088,41 @@ JOB_STARTERS.find_pointer_path = function(job, p)
     end
 
     local function launch(j)
-        local entry = st.frontier[st.qi]
-        st.cur = entry
-        local lo = entry.t - maxOffset
-        if lo < 1 then lo = 1 end
+        local cl = st.clusters[st.ci]
         local ms = createMemScan()
         j._ms, j._temp, j._scan_done = ms, true, false
         j.phase = "scanning"
         j._after_scan = onScan
         ms.OnScanDone = onScanDone(j)
-        ms.firstScan(soValueBetween, is64 and vtQword or vtDword, rtRounded, string.format("%d", lo), string.format("%d", entry.t),
+        ms.firstScan(soValueBetween, is64 and vtQword or vtDword, rtRounded, string.format("%d", cl.lo), string.format("%d", cl.hi),
                      0, USER_MODE_MAX, protect, fsmAligned, tostring(P), false, false, false, false)
     end
 
     onScan = function(j)
-        local entry, ms = st.cur, j._ms
+        local cl, ms = st.clusters[st.ci], j._ms
+        local es = cl.entries
         local fl = createFoundList(ms)
         fl.initialize()
         local n = fl.getCount()
-        if n > perScan then st.truncated = true end
-        for i = 0, math.min(n, perScan) - 1 do
+        local cap = math.min(perScan * #es, 200000)       -- max_results_per_scan stays a per-holder budget
+        if n > cap then st.truncated = true end
+        for i = 0, math.min(n, cap) - 1 do
             local loc = tonumber(fl.getAddress(i), 16)
             local val = loc and U26.ptr(loc, is64)
-            if val and val <= entry.t and entry.t - val <= maxOffset then
-                local offs, cost = { entry.t - val }, entry.t - val
-                for _, o in ipairs(entry.offs) do offs[#offs + 1] = o; cost = cost + o end
-                local m = U26.moduleFor(mods, loc)
-                if m then
-                    st.found[#st.found + 1] = { module = m.name, rva = loc - m.base, base = loc, offs = offs, cost = cost }
-                elseif st.depth < maxDepth and not st.seen[loc] then
-                    st.seen[loc] = true
-                    st.nextc[#st.nextc + 1] = { t = loc, offs = offs, cost = cost }
+            if val then
+                local k, m, checked = U26.ppFirstAtOrAbove(es, val), nil, false
+                while k <= #es and es[k].t - val <= maxOffset do
+                    local entry = es[k]
+                    local offs, cost = { entry.t - val }, entry.t - val
+                    for _, o in ipairs(entry.offs) do offs[#offs + 1] = o; cost = cost + o end
+                    if not checked then m, checked = U26.moduleFor(mods, loc), true end
+                    if m then
+                        st.found[#st.found + 1] = { module = m.name, rva = loc - m.base, base = loc, offs = offs, cost = cost }
+                    elseif st.depth < maxDepth and not st.seen[loc] then
+                        local prev = st.best[loc]          -- one holder can serve several targets: keep its cheapest chain
+                        if not prev or cost < prev.cost then st.best[loc] = { t = loc, offs = offs, cost = cost } end
+                    end
+                    k = k + 1
                 end
             end
         end
@@ -8088,15 +8130,22 @@ JOB_STARTERS.find_pointer_path = function(job, p)
         pcall(function() ms.destroy() end)
         j._ms = nil
         st.scans = st.scans + 1
-        st.qi = st.qi + 1
-        if st.qi > #st.frontier then
-            if #st.found >= maxFound or st.depth >= maxDepth or #st.nextc == 0 then return finish(j) end
-            table.sort(st.nextc, function(a, b) return a.cost < b.cost end)
+        st.searched = st.searched + #es
+        st.ci = st.ci + 1
+        if st.ci > #st.clusters then
+            local nextc = {}
+            for loc, e in pairs(st.best) do nextc[#nextc + 1] = e; st.seen[loc] = true end
+            if #st.found >= maxFound or st.depth >= maxDepth or #nextc == 0 then return finish(j) end
+            table.sort(nextc, function(a, b)
+                if a.cost ~= b.cost then return a.cost < b.cost end
+                return a.t < b.t
+            end)
             local nxt = {}
-            for i = 1, math.min(beam, #st.nextc) do nxt[i] = st.nextc[i] end
-            st.frontier, st.nextc, st.qi, st.depth = nxt, {}, 1, st.depth + 1
+            for i = 1, math.min(beam, #nextc) do nxt[i] = nextc[i] end
+            st.frontier, st.best, st.ci, st.depth = nxt, {}, 1, st.depth + 1
+            st.clusters = U26.ppClusters(nxt, maxOffset)
         end
-        j.progress = { current = st.scans, total = st.scans + (#st.frontier - st.qi + 1) }
+        j.progress = { current = st.scans, total = st.scans + (#st.clusters - st.ci + 1) }
         launch(j)
     end
 
@@ -9638,6 +9687,233 @@ end
 
 -- >>> END UNIT-30 <<<
 
+-- >>> BEGIN UNIT-31 Patch journal and undo <<<
+-- Every write made through the bridge's own write tools is recorded with the bytes it replaced, so it can be undone.
+-- U26.pjWrap wraps those handlers inside the dispatcher table itself, so writes sent through batch() are journaled
+-- too. Covered: write_memory, write_integer, write_string, copy_memory (with a dest) and auto_assemble (undone by
+-- running the script's [DISABLE] section with the info CE returned when it was enabled). NOT covered: anything else
+-- that changes the target (memory records, kernel/physical writes, injected code, scripts without [DISABLE]).
+-- The journal lives in bridge memory: a reload of the script forgets it.
+U26.PJ_MAX_ENTRIES, U26.PJ_MAX_BYTES, U26.PJ_MAX_TOTAL, U26.PJ_PREVIEW = 500, 0x10000, 16 * 1024 * 1024, 64
+serverState.patches, serverState.patch_seq, serverState.patch_bytes, serverState.patch_dropped = {}, 0, 0, 0
+U26.PJ_SIZES = { byte = 1, word = 2, ["2bytes"] = 2, dword = 4, ["4bytes"] = 4, qword = 8, ["8bytes"] = 8, float = 4, double = 8 }
+
+-- method -> function(params) -> address, size that the call is about to overwrite (nil: unknown, the call is not journaled
+-- as bytes; an invalid call simply fails in its own handler)
+U26.pjRanges = {
+    write_memory = function(p) return U26.addr(p.address), type(p.bytes) == "table" and #p.bytes or nil end,
+    write_integer = function(p) return U26.addr(p.address), U26.PJ_SIZES[p.type or "dword"] end,
+    write_string = function(p)
+        local s = p.value or p.string
+        if type(s) ~= "string" then return nil end
+        return U26.addr(p.address), p.wide and 2 * (utf8.len(s) or #s) or #s       -- CE writes no terminator
+    end,
+    copy_memory = function(p)
+        if p.dest == nil then return nil end                                   -- copies into fresh memory: nothing overwritten
+        return U26.addr(p.dest), U26.psInt(p.size)
+    end,
+}
+U26.PJ_METHODS = { "write_memory", "write_integer", "write_string", "copy_memory", "auto_assemble" }
+
+function U26.pjHex(s, max)
+    local n = math.min(#s, max or #s)
+    local out = {}
+    for i = 1, n do out[i] = string.format("%02X", s:byte(i)) end
+    return table.concat(out, " ") .. (#s > n and " ..." or "")
+end
+
+function U26.pjBytes(s)                  -- string -> byte table, in slices (string.byte cannot return 64K values at once)
+    local tbl = {}
+    for i = 1, #s, 4096 do
+        local part = { s:byte(i, math.min(i + 4095, #s)) }
+        for k = 1, #part do tbl[#tbl + 1] = part[k] end
+    end
+    return tbl
+end
+
+function U26.pjAdd(entry)
+    serverState.patch_seq = serverState.patch_seq + 1
+    entry.id = "p" .. serverState.patch_seq
+    entry.seq = serverState.patch_seq
+    entry.at = os.time()
+    entry.pid = getOpenedProcessID()
+    entry.cost = (entry.original and #entry.original * 2 or 0) + (entry.script and #entry.script or 0)
+    local list = serverState.patches
+    list[#list + 1] = entry
+    serverState.patch_bytes = serverState.patch_bytes + entry.cost
+    while #list > U26.PJ_MAX_ENTRIES or (serverState.patch_bytes > U26.PJ_MAX_TOTAL and #list > 1) do
+        local old = table.remove(list, 1)                  -- the oldest entries go first; they can no longer be undone
+        serverState.patch_bytes = serverState.patch_bytes - old.cost
+        serverState.patch_dropped = serverState.patch_dropped + 1
+    end
+    return entry.id
+end
+
+-- Runs one write handler and journals it when it succeeded.
+function U26.pjRun(method, handler, params)
+    params = params or {}
+    local addr, size
+    local rangeFn = U26.pjRanges[method]
+    if rangeFn then
+        local ok, a, s = pcall(rangeFn, params)
+        if ok then addr, size = a, s end
+    end
+    if size and size < 1 then size = nil end
+    local before
+    if addr and size and size <= U26.PJ_MAX_BYTES then before = U26.rd(addr, size) end
+    serverState.aa_last = nil
+    local res = handler(params)
+    if type(res) ~= "table" or res.success ~= true then return res end
+
+    local entry
+    if method == "auto_assemble" then
+        local last = serverState.aa_last
+        serverState.aa_last = nil
+        local script = last and last.script or params.script or params.code
+        local hasDisable = type(script) == "string" and script:lower():find("[disable]", 1, true) ~= nil
+        entry = { method = method, kind = "script", script = script, disable_info = last and last.info }
+        if not hasDisable then
+            entry.undoable, entry.reason = false, "the script has no [DISABLE] section"
+        elseif not (last and last.info) then
+            entry.undoable, entry.reason = false, "Cheat Engine returned no disable information"
+        end
+    elseif addr and size then
+        entry = { method = method, kind = "bytes", address = addr, size = size }
+        if before then
+            entry.original, entry.written = before, U26.rd(addr, size)
+        elseif size > U26.PJ_MAX_BYTES then
+            entry.undoable, entry.reason = false, "larger than " .. U26.PJ_MAX_BYTES .. " bytes: the original bytes were not kept"
+        else
+            entry.undoable, entry.reason = false, "the original bytes could not be read before the write"
+        end
+    end
+    if entry then
+        res.patch_id = U26.pjAdd(entry)
+        if entry.undoable == false then res.patch_note = "journaled but cannot be undone: " .. entry.reason end
+    end
+    return res
+end
+
+function U26.pjWrap(handlers)
+    for _, m in ipairs(U26.PJ_METHODS) do
+        local h = handlers[m]
+        if h then handlers[m] = function(params) return U26.pjRun(m, h, params) end end
+    end
+end
+
+-- live state of one entry: applied | changed | undone | unreadable | other_process | not_undoable
+function U26.pjState(e, pid)
+    if e.undone then return "undone" end
+    if e.pid ~= pid then return "other_process" end
+    if e.undoable == false then return "not_undoable" end
+    if e.kind == "script" then return "applied" end
+    local cur = U26.rd(e.address, e.size)
+    if not cur then return "unreadable" end
+    return cur == e.written and "applied" or "changed"
+end
+
+function U26.pjView(e, pid, mods)
+    local v = { id = e.id, method = e.method, kind = e.kind, at = e.at, pid = e.pid, state = U26.pjState(e, pid),
+                undoable = e.undoable ~= false and not e.undone, reason = e.reason }
+    if e.kind == "bytes" then
+        v.address, v.size = U26.hex(e.address), e.size
+        local m = U26.moduleFor(mods, e.address)
+        if m then v.expression = m.name .. "+" .. U26.hex(e.address - m.base) end
+        if e.original then
+            v.original, v.written = U26.pjHex(e.original, U26.PJ_PREVIEW), U26.pjHex(e.written, U26.PJ_PREVIEW)
+        end
+    else
+        v.script_head = e.script and e.script:sub(1, 200) or nil
+    end
+    if e.undone then v.undone_at = e.undone_at end
+    return v
+end
+
+function U26.pjFind(id)
+    for i, e in ipairs(serverState.patches) do if e.id == id then return e, i end end
+    return nil
+end
+
+-- Undo one entry. Returns { id, ok, state?, reason?, conflict? }
+function U26.pjUndoOne(e, force)
+    local out = { id = e.id }
+    local pid = getOpenedProcessID()
+    if e.undone then out.reason = "already undone"; return out end
+    if e.pid ~= pid then
+        out.reason = "made in another process (pid " .. tostring(e.pid) .. "): the target was restarted or CE is attached elsewhere"
+        return out
+    end
+    if e.undoable == false then out.reason = e.reason; return out end
+    if e.kind == "script" then
+        local ok, res, err = pcall(autoAssemble, e.script, e.disable_info)
+        if not ok or not res then
+            out.reason = "the [DISABLE] section failed: " .. tostring(ok and err or res)
+            return out
+        end
+    else
+        local cur = U26.rd(e.address, e.size)
+        if not cur then out.reason = "the memory is no longer readable"; return out end
+        if cur ~= e.written and not force then
+            out.conflict = true
+            out.reason = "the bytes changed since this patch (a later patch, the game, or another tool); force=true restores the original anyway"
+            return out
+        end
+        local ok, err = pcall(writeBytes, e.address, U26.pjBytes(e.original))
+        if not ok then out.reason = "write failed: " .. tostring(err); return out end
+        if U26.rd(e.address, e.size) ~= e.original then out.reason = "the original bytes did not stick (write-protected?)"; return out end
+    end
+    e.undone, e.undone_at = true, os.time()
+    out.ok = true
+    return out
+end
+
+function cmd_list_patches(params)
+    local pid = getOpenedProcessID()
+    local mods = U26.listModules()
+    local items = {}
+    local list = serverState.patches
+    for i = #list, 1, -1 do                                -- newest first
+        local e = list[i]
+        if not (params.active_only == true and e.undone) then items[#items + 1] = U26.pjView(e, pid, mods) end
+    end
+    local limit, offset, page, total = paginate(params, items, 50)
+    return { success = true, total = total, offset = offset, limit = limit, returned = #page, patches = page,
+             dropped = serverState.patch_dropped > 0 and serverState.patch_dropped or nil }
+end
+
+-- undo_patch(id) or undo_patch(all=true): newest first, stops nothing on a failure (each result is reported)
+function cmd_undo_patch(params)
+    local perr = requireProcess()
+    if perr then return perr end
+    local force = params.force == true
+    if params.all == true then
+        local results, undone, failed = {}, 0, 0
+        local pid = getOpenedProcessID()
+        local list = serverState.patches
+        for i = #list, 1, -1 do
+            local e = list[i]
+            if not e.undone and e.pid == pid and e.undoable ~= false then
+                local r = U26.pjUndoOne(e, force)
+                results[#results + 1] = r
+                if r.ok then undone = undone + 1 else failed = failed + 1 end
+            end
+        end
+        return { success = failed == 0, undone = undone, failed = failed, results = results,
+                 error = failed > 0 and (failed .. " patch(es) could not be undone; see results") or nil,
+                 error_code = failed > 0 and "INTERNAL_ERROR" or nil }
+    end
+    if type(params.id) ~= "string" then return U26.err("Give the id of a patch (list_patches) or all=true") end
+    local e = U26.pjFind(params.id)
+    if not e then return U26.err("No such patch: " .. params.id .. " (the journal keeps the latest " .. U26.PJ_MAX_ENTRIES .. ")", "NOT_FOUND") end
+    local r = U26.pjUndoOne(e, force)
+    if r.ok then
+        return { success = true, id = e.id, undone = true, address = e.address and U26.hex(e.address) or nil }
+    end
+    return { success = false, id = e.id, error = r.reason, error_code = "INVALID_PARAMS", conflict = r.conflict }
+end
+
+-- >>> END UNIT-31 <<<
+
 local commandHandlers = {
     -- Process & Modules
     get_process_info = cmd_get_process_info,
@@ -9912,8 +10188,14 @@ local commandHandlers = {
     get_pointer_set     = cmd_get_pointer_set,
     drop_pointer_set    = cmd_drop_pointer_set,
     -- >>> END UNIT-30 <<<
+
+    -- >>> BEGIN UNIT-31 <<<
+    list_patches        = cmd_list_patches,
+    undo_patch          = cmd_undo_patch,
+    -- >>> END UNIT-31 <<<
 }
 serverState.dispatch = commandHandlers   -- used by cmd_batch / cmd_bridge_status
+U26.pjWrap(commandHandlers)              -- journal the write tools (UNIT-31); batch() goes through this table too
 
 -- ============================================================================
 -- MAIN COMMAND PROCESSOR
