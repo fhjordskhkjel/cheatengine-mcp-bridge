@@ -12,6 +12,7 @@ setmetatable(_G, { __index = function(g, name)
   end
 end })
 
+CE_MCP_STATE_DIR = CE_MCP_STATE_DIR or "off"    -- no state files unless a test asks for them (UNIT-30/31 persistence)
 PROCESS_PID = 4242
 TARGET64 = true
 function getOpenedProcessID() return PROCESS_PID end

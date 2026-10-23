@@ -7,7 +7,11 @@ resolves close by, a null pointer on the way, a module that is gone).
 Usage: python tests/test_lua_pathsets.py [path/to/ce_mcp_bridge.lua]
 Set BRIDGE_TEST_DUMP=<file> to write the generated Lua test program for debugging.
 """
+import json
 import os
+import shutil
+import tempfile
+from pathlib import Path
 
 from lua_harness import run_lua, load, func_end, arg_path, finish, compile_check, BRIDGE_LUA
 from fake_ce import STUBS, HELPERS
@@ -270,7 +274,138 @@ print(msg)
 ok2, msg2 = run_lua(program(TESTS_X86), "x86")
 print("--- x86 target")
 print(msg2)
-allmsg = msg + "\n" + msg2
+
+# ===================== saved to a file: a reload of the bridge / a restart of CE keeps the sets =====================
+PERSIST_SETUP = r"""
+TARGET64 = true
+process = "game.exe"
+local function putPtr(loc, val) poke(loc, string.pack("<I8", val)) end
+local function setup(g)                     -- [g+3000]+10 and [[g+3008]-8]+20 both reach 0x2A000010
+  MODULES = { { Name = "game.exe", Address = g, Size = 0x5000, Is64Bit = true } }
+  putPtr(g + 0x3000, 0x2A000000)
+  putPtr(g + 0x3008, 0x2B000008); putPtr(0x2B000000, 0x29FFFFF0)
+end
+local CHAINS = { { base = "game.exe+0x3000", offsets = { 0x10 } }, { base = "game.exe+0x3008", offsets = { -0x8, 0x20 } } }
+local function slurp(path) local f = io.open(path, "rb"); if not f then return nil end local t = f:read("a"); f:close(); return t end
+"""
+
+PERSIST_1 = PERSIST_SETUP + r"""
+setup(0x140000000)
+local r = cmd_compare_pointer_paths({ target = 0x2A000010, chains = CHAINS, save_as = "hp" })
+eq("persist: both chains saved", r.hits == 2 and r.saved_as == "hp", true)
+cmd_compare_pointer_paths({ target = 0x2A000010, chains = CHAINS, save_as = "gone" })
+eq("persist: drop_pointer_set", cmd_drop_pointer_set({ name = "gone" }).deleted, 1)
+local l = cmd_list_pointer_sets({})
+eq("persist: list_pointer_sets says where the sets are saved", l.saved_to == STATE_DIR .. "\\ce_mcp_pointer_sets.json" and l.save_error == nil, true)
+local text = slurp(l.saved_to) or ""
+eq("persist: the file holds the set, not the dropped one", text:find('"hp"', 1, true) ~= nil and text:find('"gone"', 1, true) == nil, true)
+eq("persist: no temporary copy is left behind", slurp(l.saved_to .. ".tmp"), nil)
+return table.concat(results, "\n")
+"""
+
+PERSIST_2 = PERSIST_SETUP + r"""
+PROCESS_PID = 5151
+setup(0x7FF600000000)                         -- a new instance of the target: the module moved
+local l = cmd_list_pointer_sets({})
+eq("reload: the saved set is back", l.count == 1 and l.sets[1].name == "hp" and l.sets[1].chain_count == 2 and l.sets[1].runs == 1, true)
+eq("reload: a dropped set stays dropped", cmd_get_pointer_set({ name = "gone" }).error_code, "NOT_FOUND")
+local g = cmd_get_pointer_set({ name = "hp" })
+local ex = {}
+for _, c in ipairs(g.chains) do ex[#ex + 1] = c.expression end
+table.sort(ex)
+eq("reload: chains keep module, RVA and negative offsets", table.concat(ex, " "), "[[game.exe+0x3008]-0x8]+0x20 [game.exe+0x3000]+0x10")
+eq("reload: history is kept", g.history[1].pid == 4242 and g.history[1].process == "game.exe", true)
+local r = cmd_compare_pointer_paths({ target = 0x2A000010, name = "hp", save_as = "hp" })
+eq("reload: run 2 compares against the saved set", r.hits == 2 and r.same_process == false and cmd_get_pointer_set({ name = "hp" }).runs == 2, true)
+return table.concat(results, "\n")
+"""
+
+PERSIST_3 = PERSIST_SETUP + r"""
+local l = cmd_list_pointer_sets({})
+eq("third instance: the narrowed set (runs 2) was saved too", l.count == 1 and l.sets[1].runs == 2, true)
+return table.concat(results, "\n")
+"""
+
+EDITED = r"""
+local l = cmd_list_pointer_sets({})
+local names = {}
+for _, s in ipairs(l.sets) do names[#names + 1] = s.name .. ":" .. s.chain_count end
+table.sort(names)
+eq("an edited file: bad names and broken chains are skipped, the rest loads", table.concat(names, ","), "good:2,mixed:1")
+return table.concat(results, "\n")
+"""
+
+GARBAGE = PERSIST_SETUP + r"""
+local l = cmd_list_pointer_sets({})
+eq("a damaged file is ignored and reported", l.count == 0 and type(l.save_error) == "string" and l.save_error:find("ignored", 1, true) ~= nil, true)
+setup(0x140000000)
+local r = cmd_compare_pointer_paths({ target = 0x2A000010, chains = CHAINS, save_as = "fresh" })
+l = cmd_list_pointer_sets({})
+eq("... and the next save replaces it", r.saved_as == "fresh" and l.save_error == nil and (slurp(l.saved_to) or ""):find('"fresh"', 1, true) ~= nil, true)
+return table.concat(results, "\n")
+"""
+
+TMP_ONLY = r"""
+local l = cmd_list_pointer_sets({})
+eq("a save cut off between remove and rename: the .tmp copy is loaded", l.count == 1 and l.sets[1].name == "tmpset", true)
+return table.concat(results, "\n")
+"""
+
+OFF = PERSIST_SETUP + r"""
+setup(0x140000000)
+local r = cmd_compare_pointer_paths({ target = 0x2A000010, chains = CHAINS, save_as = "mem" })
+local l = cmd_list_pointer_sets({})
+eq("CE_MCP_STATE_DIR=off: sets work, nothing is saved", r.saved_as == "mem" and l.saved_to == nil and l.save_error == nil, true)
+return table.concat(results, "\n")
+"""
+
+UNWRITABLE = PERSIST_SETUP + r"""
+setup(0x140000000)
+local r = cmd_compare_pointer_paths({ target = 0x2A000010, chains = CHAINS, save_as = "mem" })
+local l = cmd_list_pointer_sets({})
+eq("an unwritable folder: the command still works and the problem is reported",
+   r.saved_as == "mem" and l.saved_to == nil and type(l.save_error) == "string" and l.save_error:find("writable", 1, true) ~= nil, true)
+return table.concat(results, "\n")
+"""
+
+
+def run_in(state, body, name):
+    pre = "CE_MCP_STATE_DIR = [[%s]]\nSTATE_DIR = CE_MCP_STATE_DIR\n" % state
+    return run_lua(pre + program(body), name)
+
+
+persist_msgs = []
+state = tempfile.mkdtemp(prefix="ce_mcp_state_")
+try:
+    for body, name in ((PERSIST_1, "persist-1"), (PERSIST_2, "persist-2"), (PERSIST_3, "persist-3")):
+        ok_p, m = run_in(state, body, name)
+        persist_msgs.append(m if ok_p else "FAIL  %s crashed: %s" % (name, m[:200]))
+    sets_file = Path(state) / "ce_mcp_pointer_sets.json"
+    chain = {"module": "game.exe", "rva": 0x3000, "offsets": [16], "runs": 1}
+    sets_file.write_text(json.dumps({"version": 1, "sets": [
+        {"name": "good", "chains": [chain, {"abs": 0x5000, "offsets": []}], "runs": 1},
+        {"name": "../evil", "chains": [chain], "runs": 1},
+        {"name": "mixed", "chains": [chain, {"module": "game.exe", "rva": 16, "offsets": ["x"]}, {"offsets": [1]}], "runs": 1},
+        {"name": "empty", "chains": [], "runs": 1}]}), encoding="utf-8")
+    ok_p, m = run_in(state, EDITED, "edited")
+    persist_msgs.append(m if ok_p else "FAIL  edited crashed: " + m[:200])
+    sets_file.write_text('{"version":1,"sets":[{"name":"x","chains":[{"mod', encoding="utf-8")
+    ok_p, m = run_in(state, GARBAGE, "garbage")
+    persist_msgs.append(m if ok_p else "FAIL  garbage crashed: " + m[:200])
+    sets_file.unlink()
+    Path(str(sets_file) + ".tmp").write_text(json.dumps({"version": 1, "sets": [{"name": "tmpset", "chains": [chain], "runs": 1}]}), encoding="utf-8")
+    ok_p, m = run_in(state, TMP_ONLY, "tmp-only")
+    persist_msgs.append(m if ok_p else "FAIL  tmp-only crashed: " + m[:200])
+finally:
+    shutil.rmtree(state, ignore_errors=True)
+ok_p, m = run_lua('CE_MCP_STATE_DIR = "off"\nSTATE_DIR = ""\n' + program(OFF), "off")
+persist_msgs.append(m if ok_p else "FAIL  off crashed: " + m[:200])
+ok_p, m = run_in(os.path.join(tempfile.gettempdir(), "ce_mcp_no_such_dir", "deeper"), UNWRITABLE, "unwritable")
+persist_msgs.append(m if ok_p else "FAIL  unwritable crashed: " + m[:200])
+print("--- state file")
+print("\n".join(persist_msgs))
+
+allmsg = msg + "\n" + msg2 + "\n" + "\n".join(persist_msgs)
 print("LUA EXEC", "OK" if ok and ok2 else "ERROR")
 print("%d passed, %d failed" % (sum(1 for l in allmsg.splitlines() if l.startswith("PASS")), sum(1 for l in allmsg.splitlines() if l.startswith("FAIL"))))
 

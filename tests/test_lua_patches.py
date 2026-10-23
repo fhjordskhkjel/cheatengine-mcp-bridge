@@ -7,7 +7,11 @@ whose write functions change the fake memory, wrapped exactly as the dispatcher 
 Usage: python tests/test_lua_patches.py [path/to/ce_mcp_bridge.lua]
 Set BRIDGE_TEST_DUMP=<file> to write the generated Lua test program for debugging.
 """
+import json
 import os
+import shutil
+import tempfile
+from pathlib import Path
 
 from lua_harness import run_lua, load, func_end, arg_path, finish, compile_check, BRIDGE_LUA
 from fake_ce import STUBS, HELPERS
@@ -231,6 +235,119 @@ if os.environ.get("BRIDGE_TEST_DUMP"):
     open(os.environ["BRIDGE_TEST_DUMP"], "w", encoding="utf-8").write(prog)
 ok, msg = run_lua(prog, "patches")
 print(msg)
+# ===================== saved to a file: a reload of the bridge / a restart of CE keeps the journal =====================
+SETUP = TESTS[:TESTS.index("-- ===================== recording =====================")].replace('eq("only the write tools are wrapped"', 'select(1, "only the write tools are wrapped"', 1) + r"""
+process = "game.exe"
+local function slurp(path) local f = io.open(path, "rb"); if not f then return nil end local t = f:read("a"); f:close(); return t end
+local function lines(path) local n = 0; for _ in (slurp(path) or ""):gmatch("[^\n]+") do n = n + 1 end return n end
+local JOURNAL = STATE_DIR .. "\\ce_mcp_patch_journal.jsonl"
+"""
+
+FIRST = SETUP + r"""
+poke(G + 0x3000, "\x11\x22\x33\x44")
+eq("persist: p1", H.write_memory({ address = G + 0x3000, bytes = { 0xAA, 0xBB } }).patch_id, "p1")
+eq("persist: p2", H.write_integer({ address = G + 0x3010, value = 5, type = "dword" }).patch_id, "p2")
+eq("persist: p3 (a script)", H.auto_assemble({ script = "[ENABLE]\nnop\n[DISABLE]\ndb 1 2" }).patch_id, "p3")
+eq("persist: p4", H.write_memory({ address = G + 0x3020, bytes = { 0x77 } }).patch_id, "p4")
+eq("persist: undo p4", cmd_undo_patch({ id = "p4" }).success, true)
+eq("persist: one line per patch and per undo", lines(JOURNAL), 5)
+local l = cmd_list_patches({})
+eq("persist: list_patches says where the journal is saved", l.saved_to == JOURNAL and l.save_error == nil, true)
+return table.concat(results, "\n")
+"""
+
+SECOND = SETUP + r"""
+poke(G + 0x3000, "\xAA\xBB\x33\x44")           -- the target kept the patched bytes while the bridge was reloaded
+poke(G + 0x3010, "\x05\x00\x00\x00")
+local l = cmd_list_patches({ limit = 100 })
+eq("reload: the journal is back", l.total, 4)
+local p1, p3, p4 = byId(l, "p1"), byId(l, "p3"), byId(l, "p4")
+eq("reload: a byte patch keeps its bytes and stays undoable", p1.state == "applied" and p1.undoable == true and p1.original == "11 22"
+   and p1.written == "AA BB" and p1.process == "game.exe", true)
+eq("reload: a script patch cannot be undone any more (CE's disable info is gone) and says why",
+   p3.state == "not_undoable" and p3.undoable == false and p3.reason:find("disable information", 1, true) ~= nil, true)
+eq("reload: an undone patch stays undone", p4.state == "undone" and p4.undoable == false, true)
+eq("reload: the file is compacted (the undo line is folded into its patch)", lines(JOURNAL), 4)
+eq("reload: new ids continue after the old ones", H.write_memory({ address = G + 0x3030, bytes = { 1 } }).patch_id, "p5")
+local r = cmd_undo_patch({ id = "p1" })
+eq("reload: a byte patch from the previous instance is undone", r.success == true and rdhex(G + 0x3000, 2) == "11 22", true)
+eq("reload: appended again (p5 and the undo)", lines(JOURNAL), 6)
+return table.concat(results, "\n")
+"""
+
+THIRD = SETUP + r"""
+process = "other.exe"                          -- the same pid now belongs to another program
+poke(G + 0x3010, "\x05\x00\x00\x00")
+local l = cmd_list_patches({ limit = 100 })
+eq("pid reuse: a patch of another program with the same pid is other_process", byId(l, "p2").state, "other_process")
+local r = cmd_undo_patch({ id = "p2" })
+eq("pid reuse: ... and is not undone", r.success == false and r.error:find("another process", 1, true) ~= nil and rdhex(G + 0x3010, 4) == "05 00 00 00", true)
+eq("pid reuse: undo all leaves it alone", cmd_undo_patch({ all = true }).undone, 0)
+return table.concat(results, "\n")
+"""
+
+FOURTH = SETUP + r"""
+poke(G + 0x3010, "\x05\x00\x00\x00")
+poke(G + 0x3030, "\x01")
+eq("drop_patches: an unknown 'which'", cmd_drop_patches({ which = "some" }).error_code, "INVALID_PARAMS")
+local r = cmd_drop_patches({})
+eq("drop_patches: forgets the undone and not undoable entries, keeps the applied ones", r.dropped == 3 and r.kept == 2, true)
+local l = cmd_list_patches({ limit = 100 })
+eq("drop_patches: what is left", l.total == 2 and byId(l, "p2").state == "applied" and byId(l, "p5").state == "applied", true)
+eq("drop_patches: the target's memory is not touched", rdhex(G + 0x3010, 4), "05 00 00 00")
+eq("drop_patches: the file is rewritten", lines(JOURNAL), 2)
+eq("undo p5 adds an undo line", cmd_undo_patch({ id = "p5" }).success == true and lines(JOURNAL) == 3, true)
+serverState.pj_lines = 2 * U26.PJ_MAX_ENTRIES + 100
+H.write_memory({ address = G + 0x3040, bytes = { 2 } })
+eq("a journal file that grew too long is compacted on the next write (one line per entry)", lines(JOURNAL), 3)
+return table.concat(results, "\n")
+"""
+
+FIFTH = SETUP + r"""
+local l = cmd_list_patches({ limit = 100 })
+local ids = {}
+for _, p in ipairs(l.patches) do ids[#ids + 1] = p.id end
+eq("damaged lines (cut off, wrong size, unknown kind) are skipped", table.concat(ids, ","), "p7,p6,p5,p2")
+eq("drop_patches(all) forgets everything", cmd_drop_patches({ which = "all" }).dropped == 4 and cmd_list_patches({}).total == 0 and lines(JOURNAL) == 0, true)
+return table.concat(results, "\n")
+"""
+
+OFF = SETUP + r"""
+local r = H.write_memory({ address = G + 0x3000, bytes = { 1 } })
+local l = cmd_list_patches({})
+eq("CE_MCP_STATE_DIR=off: the journal works in memory, nothing is saved", r.patch_id == "p1" and l.saved_to == nil and l.save_error == nil, true)
+return table.concat(results, "\n")
+"""
+
+
+def run_in(state, body, name):
+    return run_lua("CE_MCP_STATE_DIR = [[%s]]\nSTATE_DIR = CE_MCP_STATE_DIR\n" % state + common + HELPERS + body, name)
+
+
+persist_msgs = []
+state = tempfile.mkdtemp(prefix="ce_mcp_state_")
+try:
+    for body, name in ((FIRST, "persist-1"), (SECOND, "persist-2"), (THIRD, "persist-3"), (FOURTH, "persist-4")):
+        ok_p, m = run_in(state, body, name)
+        persist_msgs.append(m if ok_p else "FAIL  %s crashed: %s" % (name, m[:200]))
+    journal = Path(state) / "ce_mcp_patch_journal.jsonl"
+    with journal.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"op": "add", "e": {"id": "p7", "seq": 7, "pid": 4242, "kind": "bytes", "address": 4096, "size": 1,
+                                               "original": "00", "written": "01", "method": "write_memory"}}) + "\n")
+        f.write(json.dumps({"op": "add", "e": {"id": "p8", "seq": 8, "pid": 4242, "kind": "bytes", "address": 4096, "size": 2,
+                                               "original": "00", "written": "01", "method": "write_memory"}}) + "\n")
+        f.write(json.dumps({"op": "add", "e": {"id": "p9", "seq": 9, "pid": 4242, "kind": "magic"}}) + "\n")
+        f.write('{"op":"add","e":{"id":"p10","seq":10,"ki')
+    ok_p, m = run_in(state, FIFTH, "persist-5")
+    persist_msgs.append(m if ok_p else "FAIL  persist-5 crashed: " + m[:200])
+finally:
+    shutil.rmtree(state, ignore_errors=True)
+ok_p, m = run_lua('CE_MCP_STATE_DIR = "off"\nSTATE_DIR = ""\n' + common + HELPERS + OFF, "off")
+persist_msgs.append(m if ok_p else "FAIL  off crashed: " + m[:200])
+print("--- state file")
+print("\n".join(persist_msgs))
+msg = msg + "\n" + "\n".join(persist_msgs)
+
 print("LUA EXEC", "OK" if ok else "ERROR")
 print("%d passed, %d failed" % (sum(1 for l in msg.splitlines() if l.startswith("PASS")), sum(1 for l in msg.splitlines() if l.startswith("FAIL"))))
 

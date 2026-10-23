@@ -16,6 +16,8 @@ What this does
 Usage: python tests/test_lua_load.py [path/to/ce_mcp_bridge.lua]
 """
 import json
+import shutil
+import tempfile
 import re
 
 from lua_harness import run_lua, load, arg_path, finish, compile_check, BRIDGE_LUA
@@ -39,7 +41,8 @@ OWN = {"bridge_status", "read_struct", "batch", "start_job", "get_job", "get_job
        "pe_exports", "pe_tls_callbacks", "va_to_rva", "rva_to_va", "rebase_address", "export_names", "export_structures", "import_names",
        "snapshot_region", "list_snapshots", "delete_snapshot", "diff_snapshots", "pe_functions", "recover_struct", "get_halted_state",
        "set_breakpoint", "set_data_breakpoint", "remove_breakpoint", "list_breakpoints", "get_breakpoint_hits", "clear_all_breakpoints",
-       "compare_pointer_paths", "list_pointer_sets", "get_pointer_set", "drop_pointer_set", "list_patches", "undo_patch"}
+       "compare_pointer_paths", "list_pointer_sets", "get_pointer_set", "drop_pointer_set", "list_patches", "undo_patch",
+       "drop_patches"}
 # of those, the ones that need an attached process and must say so
 NEEDS_PROCESS = {"read_struct", "pe_info", "pe_imports", "pe_exports", "pe_tls_callbacks", "pe_functions", "recover_struct", "snapshot_region",
                  "set_breakpoint", "set_data_breakpoint", "compare_pointer_paths", "undo_patch"}
@@ -52,6 +55,7 @@ setmetatable(_G, { __index = function(g, name)          -- CE constants (vtByte,
   end
 end })
 PID = %(pid)d
+CE_MCP_STATE_DIR = CE_MCP_STATE_DIR or "off"
 local queue = {}
 RESPONSES = {}
 THREADS = {}
@@ -198,5 +202,38 @@ print("-- patch journal wiring")
 print(("PASS  " if rep.get("write_memory", {}).get("patch_id") == "p1" else "FAIL  ") + "write_memory through the real dispatcher returns a patch id  " + str(rep.get("write_memory"))[:160])
 print(("PASS  " if (rep.get("batch", {}).get("results") or [{}])[0].get("patch_id") == "p2" else "FAIL  ") + "a write inside batch is journaled  " + str(rep.get("batch"))[:160])
 print(("PASS  " if rep.get("list_patches", {}).get("total") == 2 else "FAIL  ") + "list_patches sees both  " + str(rep.get("list_patches"))[:160])
+
+# the whole file saves pointer sets and the patch journal, and the next instance (a reload or a CE restart) loads them
+state_dir = tempfile.mkdtemp(prefix="ce_mcp_state_")
+
+
+def instance(feeds, name):
+    code = ('CE_MCP_STATE_DIR = ' + lua_long(state_dir) + '\n' + FAKE % {"pid": 4242, "run": "true"}
+            + "\nfunction writeBytes() return true end\nfunction readBytes(a, n) return { 1, 2 } end\n"
+            + "BRIDGE_SOURCE = " + lua_long(src) + "\n" + BRIDGE + "".join("FEED('%s', '%s')\n" % f for f in feeds)
+            + "bridge_chunk()\nreturn table.concat(RESPONSES, '\\n')\n")
+    ok, text = run_lua(code, name, ascii_only=False)
+    out = {}
+    for line in text.split("\n") if ok else []:
+        try:
+            r = json.loads(line)
+            out[r.get("id")] = r.get("result", {})
+        except ValueError:
+            pass
+    return out
+
+
+first = instance([("write_memory", '{"address":4096,"bytes":[7,8]}'),
+                  ("compare_pointer_paths", '{"target":20480,"chains":[{"base":20480,"offsets":[]}],"save_as":"kept"}')], "persist-1")
+second = instance([("list_patches", "{}"), ("list_pointer_sets", "{}")], "persist-2")
+print("-- state files")
+print(("PASS  " if first.get("compare_pointer_paths", {}).get("saved_as") == "kept" and first.get("write_memory", {}).get("patch_id") == "p1" else "FAIL  ")
+      + "the first instance saves a set and journals a write  " + str(first)[:160])
+lp, ls = second.get("list_patches", {}), second.get("list_pointer_sets", {})
+print(("PASS  " if lp.get("total") == 1 and lp["patches"][0].get("id") == "p1" else "FAIL  ") + "the next instance has the journal  " + str(lp)[:160])
+print(("PASS  " if ls.get("count") == 1 and ls["sets"][0].get("name") == "kept" else "FAIL  ") + "the next instance has the pointer set  " + str(ls)[:160])
+print(("PASS  " if str(ls.get("saved_to", "")).startswith(state_dir) and ls.get("save_error") is None else "FAIL  ")
+      + "list_pointer_sets says where the sets are saved  " + str(ls.get("saved_to")))
+shutil.rmtree(state_dir, ignore_errors=True)
 
 finish()

@@ -3207,6 +3207,7 @@ The MCP bridge Python server (`mcp_cheatengine.py`) reads the following environm
 | `CE_MCP_ALLOW_SHELL` | int (0 or 1) | 0 | Set to `1` to enable shell execution tools (`run_command`, `shell_execute`). **Disabled by default for security.** |
 | `CE_MCP_PROFILE` | string | `full` | `readonly` \| `analysis` \| `patch` \| `full`: the highest tier of tool the client may use (section 37). Unknown value = `readonly`. |
 | `CE_MCP_TOOLSET` | string | all | Comma separated tool groups / presets to list (section 37). Not a permission. |
+| `CE_MCP_STATE_DIR` | string | see section 38 | Read by the **Lua bridge**, not the MCP server: folder for the saved pointer sets and patch journal (`off` disables saving). Set it in Cheat Engine's environment or as a Lua global before the script runs. |
 | `CE_MCP_ALLOW`, `CE_MCP_DENY` | string | unset | Comma separated tool names to lift above / remove below the profile. Deny wins. |
 
 **Setting environment variables:**
@@ -3563,7 +3564,9 @@ A pointer chain that works in one run is only useful if it works after the targe
 
 **Set management:** `list_pointer_sets` (name, `chain_count`, `runs`, `arch`, `created`, `updated`, `history[]`), `get_pointer_set(name, offset, limit)` (the chains plus the history) and `drop_pointer_set(name | all)`. History entries are `{run, at, pid, process, target, tested, survivors, source}` (`source`: `find_pointer_path`, `compare` or `inline`); only the last 20 are kept.
 
-**Limits.** 16 sets, 5000 chains per set, 16 offsets per chain, names of letters/digits/`_.-` up to 48 characters. Sets live in bridge memory: they survive target restarts, not a reload of `ce_mcp_bridge.lua` or closing CE; copy chains out with `get_pointer_set` when they matter. The comparison tests chains, it does not search: a chain that `find_pointer_path` did not find in run 1 (it is a capped reverse scan) cannot be confirmed later.
+**Saved to disk.** Every change to the sets is written to `ce_mcp_pointer_sets.json` in the state folder and read back when the script runs, so sets survive target restarts, reloads of `ce_mcp_bridge.lua` and CE restarts. `list_pointer_sets` reports the file as `saved_to` and a failed save as `save_error` (the command itself still succeeds). A damaged file is ignored (and reported); chains or sets in it that do not parse are skipped. State folder: the Lua global or environment variable `CE_MCP_STATE_DIR` (`off` disables saving), else the folder of `ce_mcp_bridge.lua` when it was loaded with `dofile`, else `%LOCALAPPDATA%`, else CE's temp folder; the first writable one is used.
+
+**Limits.** 16 sets, 5000 chains per set, 16 offsets per chain, names of letters/digits/`_.-` up to 48 characters. The comparison tests chains, it does not search: a chain that `find_pointer_path` did not find in run 1 (it is a capped reverse scan) cannot be confirmed later.
 
 ---
 
@@ -3579,11 +3582,15 @@ Every write made through the bridge's own write tools is journaled with the byte
 
 The reply of a journaled write carries `patch_id` (and `patch_note` when the entry cannot be undone). Not journaled: memory-record writes, kernel/physical (`*_cr3`, DBK) writes, injected or executed code, memory allocations.
 
-**`list_patches(active_only, offset, limit)`**: newest first, `{id, method, kind (bytes|script), address, expression, size, original, written (hex, first 64 bytes), at, pid, state, undoable, reason}` plus `dropped` when old entries were discarded. `state` is computed live: `applied`, `changed` (something wrote over the patch since), `undone`, `not_undoable`, `other_process` (made in an earlier instance of the target), `unreadable`.
+**`list_patches(active_only, offset, limit)`**: newest first, `{id, method, kind (bytes|script), address, expression, size, original, written (hex, first 64 bytes), at, pid, state, undoable, reason}` plus `dropped` when old entries were discarded. `state` is computed live: `applied`, `changed` (something wrote over the patch since), `undone`, `not_undoable`, `other_process` (made in an earlier instance of the target, or by another program that got the same pid: entries record the process name too), `unreadable`. The reply also has `saved_to` / `save_error` (see below).
 
 **`undo_patch(id | all, force)`**: restores the original bytes and reads them back to verify (`"did not stick"` otherwise). Refused with a reason when the patch is already undone, belongs to another pid, cannot be undone, or when the current bytes differ from what the patch wrote (`conflict: true`; a later patch, the game or another tool changed them). `force=true` restores anyway. `all=true` undoes every active patch of the current process newest first, so stacked patches on the same bytes unwind in the right order, and reports each result.
 
-**Limits.** 500 entries and 16 MB (oldest dropped first); a single write over 64 KB is listed but its original is not kept. The journal lives in bridge memory and is lost when the script is reloaded.
+**`drop_patches(which)`**: forgets journal entries without touching memory. `which="inactive"` (default) drops the undone ones, those of another process and those that cannot be undone; `"all"` empties the journal. Returns `dropped` and `kept`.
+
+**Saved to disk.** The journal is appended to `ce_mcp_patch_journal.jsonl` in the state folder (section 38): one line per patch and per undo, compacted when the script loads and when the file grows long. After a reload of the bridge or a restart of CE the journal comes back: byte patches can still be undone as long as the same process is attached (same pid and process name; the conflict check still applies), script patches are listed as not undoable because Cheat Engine's disable information cannot be saved (disable them in CE). Damaged lines are skipped.
+
+**Limits.** 500 entries and 16 MB (oldest dropped first); a single write over 64 KB is listed but its original is not kept.
 
 ---
 

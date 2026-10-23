@@ -212,20 +212,24 @@ mod.undo_patch("p3")
 check("undo_patch by id", params_seen["undo_patch"] == {"id": "p3"}, params_seen["undo_patch"])
 mod.undo_patch(all=True, force=True)
 check("undo_patch all + force", params_seen["undo_patch"] == {"all": True, "force": True}, params_seen["undo_patch"])
+mod.drop_patches()
+check("drop_patches defaults to the inactive entries", params_seen["drop_patches"] == {"which": "inactive"}, params_seen["drop_patches"])
+mod.drop_patches("all")
+check("drop_patches all", params_seen["drop_patches"] == {"which": "all"}, params_seen["drop_patches"])
 
 # ---- retry policy table for the new bridge methods
 for m, want in [("pe_info", True), ("get_halted_state", True), ("pe_functions", True), ("pe_imports", True), ("pe_exports", True), ("pe_tls_callbacks", True), ("va_to_rva", True),
                 ("rva_to_va", True), ("rebase_address", True), ("export_names", True), ("export_structures", True), ("diff_snapshots", True),
                 ("snapshot_region", True), ("list_snapshots", True), ("delete_snapshot", True), ("import_names", False), ("start_job", False),
                 ("list_pointer_sets", True), ("get_pointer_set", True), ("compare_pointer_paths", False), ("drop_pointer_set", False),
-                ("list_patches", True), ("undo_patch", False)]:
+                ("list_patches", True), ("undo_patch", False), ("drop_patches", False)]:
     check("is_idempotent(%s)==%s" % (m, want), mod.is_idempotent(m) == want)
 
 # ---- MCP registration / schemas
 tools = {tool.name: tool for tool in mod.mcp._tool_manager.list_tools()}
 need = ["pe_info", "get_halted_state", "pe_functions", "recover_struct", "pe_imports", "pe_exports", "pe_tls_callbacks", "va_to_rva", "rva_to_va", "rebase_address", "export_names", "export_structures",
         "import_names", "rtti_scan_module", "find_string_refs", "find_xrefs", "find_code_caves", "find_pointer_path", "snapshot_region", "list_snapshots",
-        "delete_snapshot", "diff_snapshots", "compare_pointer_paths", "list_pointer_sets", "get_pointer_set", "drop_pointer_set", "list_patches", "undo_patch"]
+        "delete_snapshot", "diff_snapshots", "compare_pointer_paths", "list_pointer_sets", "get_pointer_set", "drop_pointer_set", "list_patches", "undo_patch", "drop_patches"]
 check("all new tools registered with MCP", all(n in tools for n in need), [n for n in need if n not in tools])
 check("diff_snapshots schema", tools["diff_snapshots"].parameters["properties"]["snapshots"]["type"] == "array", tools["diff_snapshots"].parameters)
 check("find_xrefs requires address", tools["find_xrefs"].parameters.get("required") == ["address"], tools["find_xrefs"].parameters.get("required"))

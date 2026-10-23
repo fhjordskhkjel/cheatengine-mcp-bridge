@@ -44,7 +44,7 @@ _g("memory", READ, "read_memory read_bytes read_integer read_string read_pointer
                    "compare_memory get_memory_regions enum_memory_regions_full get_memory_protection")
 _g("memory", READ, "list_patches")
 _g("memory", WRITE, "write_integer write_memory write_string copy_memory allocate_memory free_memory set_memory_protection full_access "
-                    "undo_patch")
+                    "undo_patch drop_patches")
 
 # ---- scanning
 _g("scan", READ, "scan_all next_scan get_scan_results aob_scan pattern_scan aob_scan_unique aob_scan_module aob_scan_module_unique "

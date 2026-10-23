@@ -9355,12 +9355,86 @@ JOB_KIND_NAMES = JOB_KIND_NAMES .. ", find_xrefs"
 
 -- >>> BEGIN UNIT-30 Pointer path sets: comparing pointer chains across runs <<<
 -- A pointer chain found in one run is only worth something if it still works after the target restarts. A "set" is a
--- named list of chains {module+RVA, offsets} kept inside the bridge, so it outlives target restarts (not a reload of the
--- bridge). find_pointer_path(save_as=) fills one in run 1; after the restart compare_pointer_paths re-resolves every
+-- named list of chains {module+RVA, offsets} kept inside the bridge and saved to a file (U26.stDir), so it outlives target
+-- restarts, reloads of the bridge and restarts of Cheat Engine. find_pointer_path(save_as=) fills one in run 1; after the restart compare_pointer_paths re-resolves every
 -- chain against the new address of the same value and keeps those that land on it. Saving the survivors back narrows
 -- the set: a chain with runs=3 has reached its value in three separate runs.
 U26.PS_MAX_SETS, U26.PS_MAX_CHAINS, U26.PS_MAX_DEPTH, U26.PS_MAX_HISTORY = 16, 5000, 16, 20
 serverState.path_sets = {}
+
+-- State files (pointer sets here, the patch journal in UNIT-31). Folder: the Lua global CE_MCP_STATE_DIR, else the
+-- environment variable of that name ("off" disables saving), else the folder of this script (when it was loaded with
+-- dofile), else %LOCALAPPDATA%, else CE's temp folder; the first one that is writable wins. A failed save never fails
+-- the command: it is reported as save_error by list_pointer_sets / list_patches.
+U26.PS_FILE, U26.PJ_FILE = "ce_mcp_pointer_sets.json", "ce_mcp_patch_journal.jsonl"
+
+function U26.stDir()
+    if serverState.state_dir ~= nil then return serverState.state_dir or nil end
+    serverState.state_dir = false
+    local cands = {}
+    local cfg = rawget(_G, "CE_MCP_STATE_DIR") or os.getenv("CE_MCP_STATE_DIR")
+    if type(cfg) == "string" and cfg ~= "" then
+        if cfg:lower() == "off" then return nil end
+        cands[1] = cfg
+    else
+        local src = debug.getinfo(1, "S").source
+        if type(src) == "string" and src:sub(1, 1) == "@" then cands[#cands + 1] = src:sub(2):match("^(.*)[\\/][^\\/]*$") end
+        cands[#cands + 1] = os.getenv("LOCALAPPDATA")
+        local ok, tmp = pcall(getTempFolder)
+        if ok then cands[#cands + 1] = tmp end
+    end
+    for _, d in ipairs(cands) do
+        if type(d) == "string" and d ~= "" then
+            d = d:gsub("[\\/]+$", "")
+            local probe = d .. "\\ce_mcp_state.probe"
+            local f = io.open(probe, "wb")
+            if f then
+                f:close()
+                os.remove(probe)
+                serverState.state_dir = d
+                return d
+            end
+        end
+    end
+    if #cands > 0 then serverState.state_error = "no writable folder for the state files (set CE_MCP_STATE_DIR)" end
+    return nil
+end
+
+function U26.stPath(file)
+    local d = U26.stDir()
+    return d and (d .. "\\" .. file) or nil
+end
+
+-- Replace a state file. The new content goes to a .tmp copy first, so a crash never leaves half a file behind.
+function U26.stWrite(file, text)
+    local path = U26.stPath(file)
+    if not path then return false end
+    local tmp = path .. ".tmp"
+    local f, err = io.open(tmp, "wb")
+    if not f then serverState.state_error = "cannot write " .. tmp .. ": " .. tostring(err); return false end
+    local ok, werr = f:write(text)
+    f:close()
+    if not ok then serverState.state_error = "cannot write " .. tmp .. ": " .. tostring(werr); return false end
+    os.remove(path)
+    local rok, rerr = os.rename(tmp, path)
+    if not rok then serverState.state_error = "cannot replace " .. path .. ": " .. tostring(rerr); return false end
+    serverState.state_error = nil
+    return true
+end
+
+function U26.stRead(file)
+    local path = U26.stPath(file)
+    if not path then return nil end
+    local f = io.open(path, "rb") or io.open(path .. ".tmp", "rb")     -- .tmp only: a save cut off between remove and rename
+    if not f then return nil end
+    local text = f:read("a")
+    f:close()
+    return text
+end
+
+function U26.stInfo(file)
+    return U26.stPath(file), serverState.state_error
+end
 
 function U26.psName(v)
     if type(v) == "string" and #v <= 48 and v:match("^[%w_%.%-]+$") then return v end
@@ -9490,7 +9564,70 @@ function U26.psPut(name, chains, runs, history)
     local s = { name = name, chains = chains, runs = runs, history = history, created = old and old.created or now, updated = now,
                 arch = targetIs64Bit() and "x64" or "x86" }
     serverState.path_sets[name] = s
+    U26.psSave()
     return s
+end
+
+function U26.psSave()
+    if not U26.stDir() then return end
+    local list = {}
+    for _, s in pairs(serverState.path_sets) do list[#list + 1] = s end
+    table.sort(list, function(a, b) return a.name < b.name end)
+    local ok, text = pcall(json.encode, { version = 1, sets = list })
+    if ok then U26.stWrite(U26.PS_FILE, text) else serverState.state_error = "cannot encode the pointer sets: " .. tostring(text) end
+end
+
+-- one chain as it was saved -> record (nil when the file was edited into something that is not a chain)
+function U26.psLoadChain(c)
+    if type(c) ~= "table" or type(c.offsets) ~= "table" or #c.offsets > U26.PS_MAX_DEPTH then return nil end
+    local offs = {}
+    for i, o in ipairs(c.offsets) do
+        offs[i] = U26.psInt(o)
+        if not offs[i] then return nil end
+    end
+    local rec = { offsets = offs, runs = U26.psInt(c.runs) or 0 }
+    if type(c.module) == "string" and c.module ~= "" and U26.psInt(c.rva) then
+        rec.module, rec.rva = c.module, U26.psInt(c.rva)
+    elseif U26.psInt(c.abs) then
+        rec.abs = U26.psInt(c.abs)
+    else
+        return nil
+    end
+    return rec
+end
+
+-- Called once when the script is executed: the sets saved by the previous instance of the bridge come back.
+function U26.psLoad()
+    local text = U26.stRead(U26.PS_FILE)
+    if not text then return 0 end
+    local ok, data = pcall(json.decode, text)
+    if not ok or type(data) ~= "table" or type(data.sets) ~= "table" then
+        serverState.state_error = "ignored " .. U26.PS_FILE .. ": it is not a pointer set file"
+        return 0
+    end
+    local n = 0
+    for _, s in ipairs(data.sets) do
+        local name = type(s) == "table" and U26.psName(s.name) or nil
+        local chains = {}
+        if name and type(s.chains) == "table" then
+            for _, c in ipairs(s.chains) do
+                local rec = U26.psLoadChain(c)
+                if rec and #chains < U26.PS_MAX_CHAINS then chains[#chains + 1] = rec end
+            end
+        end
+        if name and #chains > 0 and n < U26.PS_MAX_SETS and not serverState.path_sets[name] then
+            local hist = {}
+            if type(s.history) == "table" then
+                for _, h in ipairs(s.history) do if type(h) == "table" then hist[#hist + 1] = h end end
+            end
+            while #hist > U26.PS_MAX_HISTORY do table.remove(hist, 1) end
+            serverState.path_sets[name] = { name = name, chains = chains, runs = U26.psInt(s.runs) or 0, history = hist,
+                                            created = U26.psInt(s.created) or os.time(), updated = U26.psInt(s.updated) or os.time(),
+                                            arch = s.arch == "x86" and "x86" or "x64" }
+            n = n + 1
+        end
+    end
+    return n
 end
 
 -- find_pointer_path(save_as=): run 1 of a comparison
@@ -9656,7 +9793,8 @@ function cmd_list_pointer_sets(params)
         if a.created ~= b.created then return a.created < b.created end
         return a.name < b.name
     end)
-    return { success = true, count = #list, sets = list }
+    local path, saveErr = U26.stInfo(U26.PS_FILE)
+    return { success = true, count = #list, sets = list, saved_to = path, save_error = saveErr }
 end
 
 function cmd_get_pointer_set(params)
@@ -9676,14 +9814,18 @@ function cmd_drop_pointer_set(params)
     if params.all == true then
         local n = U26.psCount()
         serverState.path_sets = {}
+        U26.psSave()
         return { success = true, deleted = n }
     end
     if not serverState.path_sets[params.name] then
         return U26.err("No such pointer set: " .. tostring(params.name), "NOT_FOUND")
     end
     serverState.path_sets[params.name] = nil
+    U26.psSave()
     return { success = true, deleted = 1 }
 end
+
+U26.psLoad()
 
 -- >>> END UNIT-30 <<<
 
@@ -9693,9 +9835,12 @@ end
 -- too. Covered: write_memory, write_integer, write_string, copy_memory (with a dest) and auto_assemble (undone by
 -- running the script's [DISABLE] section with the info CE returned when it was enabled). NOT covered: anything else
 -- that changes the target (memory records, kernel/physical writes, injected code, scripts without [DISABLE]).
--- The journal lives in bridge memory: a reload of the script forgets it.
+-- The journal is also appended to a file (U26.PJ_FILE, next to the pointer sets), so a reload of the bridge or a restart
+-- of CE keeps it. Byte patches stay undoable across that while the same process is attached; script patches do not
+-- (CE's disable information cannot be saved).
 U26.PJ_MAX_ENTRIES, U26.PJ_MAX_BYTES, U26.PJ_MAX_TOTAL, U26.PJ_PREVIEW = 500, 0x10000, 16 * 1024 * 1024, 64
 serverState.patches, serverState.patch_seq, serverState.patch_bytes, serverState.patch_dropped = {}, 0, 0, 0
+serverState.pj_lines = 0                 -- lines in the journal file; it is rewritten (compacted) when it grows too long
 U26.PJ_SIZES = { byte = 1, word = 2, ["2bytes"] = 2, dword = 4, ["4bytes"] = 4, qword = 8, ["8bytes"] = 8, float = 4, double = 8 }
 
 -- method -> function(params) -> address, size that the call is about to overwrite (nil: unknown, the call is not journaled
@@ -9736,17 +9881,125 @@ function U26.pjAdd(entry)
     entry.id = "p" .. serverState.patch_seq
     entry.seq = serverState.patch_seq
     entry.at = os.time()
-    entry.pid = getOpenedProcessID()
+    local pr = U26.psProcess()
+    entry.pid, entry.process = pr.pid, pr.process
     entry.cost = (entry.original and #entry.original * 2 or 0) + (entry.script and #entry.script or 0)
     local list = serverState.patches
     list[#list + 1] = entry
     serverState.patch_bytes = serverState.patch_bytes + entry.cost
+    U26.pjTrim()
+    U26.pjAppend({ op = "add", e = U26.pjRecord(entry) })
+    return entry.id
+end
+
+function U26.pjTrim()
+    local list = serverState.patches
     while #list > U26.PJ_MAX_ENTRIES or (serverState.patch_bytes > U26.PJ_MAX_TOTAL and #list > 1) do
         local old = table.remove(list, 1)                  -- the oldest entries go first; they can no longer be undone
         serverState.patch_bytes = serverState.patch_bytes - old.cost
         serverState.patch_dropped = serverState.patch_dropped + 1
     end
-    return entry.id
+end
+
+-- Was the entry made in the process CE is attached to now? A pid alone can be reused by another program after a restart,
+-- so the process name has to match too (when both are known).
+function U26.pjSame(e, pr)
+    if e.pid ~= pr.pid then return false end
+    return e.process == nil or pr.process == nil or e.process:lower() == pr.process:lower()
+end
+
+function U26.pjHexRaw(s) return (s:gsub(".", function(c) return string.format("%02X", c:byte()) end)) end
+
+function U26.pjUnhex(h)
+    if type(h) ~= "string" or #h % 2 == 1 or not h:match("^%x*$") then return nil end
+    return (h:gsub("%x%x", function(x) return string.char(tonumber(x, 16)) end))
+end
+
+-- JSON-safe copy of an entry (byte strings as hex; CE's disable info is left out, it cannot be saved)
+function U26.pjRecord(e)
+    return { id = e.id, seq = e.seq, at = e.at, pid = e.pid, process = e.process, method = e.method, kind = e.kind,
+             address = e.address, size = e.size, original = e.original and U26.pjHexRaw(e.original) or nil,
+             written = e.written and U26.pjHexRaw(e.written) or nil, script = e.script, undoable = e.undoable,
+             reason = e.reason, undone = e.undone, undone_at = e.undone_at }
+end
+
+-- saved record -> entry (nil when it is damaged)
+function U26.pjFromRecord(r)
+    local seq = U26.psInt(r.seq)
+    if not seq or type(r.id) ~= "string" or (r.kind ~= "bytes" and r.kind ~= "script") then return nil end
+    local e = { id = r.id, seq = seq, at = U26.psInt(r.at), pid = U26.psInt(r.pid), method = tostring(r.method), kind = r.kind,
+                process = type(r.process) == "string" and r.process or nil, undone = r.undone == true or nil,
+                undone_at = U26.psInt(r.undone_at) }
+    if r.undoable == false then e.undoable, e.reason = false, tostring(r.reason) end
+    if e.kind == "bytes" then
+        e.address, e.size = U26.psInt(r.address), U26.psInt(r.size)
+        if not e.address or not e.size then return nil end
+        if r.original ~= nil or r.written ~= nil then
+            e.original, e.written = U26.pjUnhex(r.original), U26.pjUnhex(r.written)
+            if not e.original or not e.written or #e.original ~= e.size or #e.written ~= e.size then return nil end
+        elseif e.undoable ~= false then
+            return nil
+        end
+    else
+        e.script = type(r.script) == "string" and r.script or nil
+        if e.undoable ~= false and not e.undone then
+            e.undoable, e.reason = false, "Cheat Engine's disable information does not survive a reload of the bridge: disable the script in Cheat Engine"
+        end
+    end
+    e.cost = (e.original and #e.original * 2 or 0) + (e.script and #e.script or 0)
+    return e
+end
+
+-- The whole journal as it is now (also compacts the file: undo lines and dropped entries disappear)
+function U26.pjRewrite()
+    if not U26.stDir() then return end
+    local out = {}
+    for _, e in ipairs(serverState.patches) do
+        local ok, line = pcall(json.encode, { op = "add", e = U26.pjRecord(e) })
+        if ok then out[#out + 1] = line .. "\n" end
+    end
+    if U26.stWrite(U26.PJ_FILE, table.concat(out)) then serverState.pj_lines = #out end
+end
+
+function U26.pjAppend(rec)
+    local path = U26.stPath(U26.PJ_FILE)
+    if not path then return end
+    if serverState.pj_lines >= 2 * U26.PJ_MAX_ENTRIES + 100 then return U26.pjRewrite() end    -- rec is already in the journal
+    local ok, line = pcall(json.encode, rec)
+    if not ok then serverState.state_error = "cannot encode a journal entry: " .. tostring(line); return end
+    local f, err = io.open(path, "ab")
+    if not f then serverState.state_error = "cannot append to " .. path .. ": " .. tostring(err); return end
+    f:write(line, "\n")
+    f:close()
+    serverState.pj_lines = serverState.pj_lines + 1
+end
+
+-- Called once when the script is executed: replays the journal file of the previous instance of the bridge.
+function U26.pjLoad()
+    local text = U26.stRead(U26.PJ_FILE)
+    if not text then return 0 end
+    local list, byId = {}, {}
+    for line in text:gmatch("[^\r\n]+") do
+        local ok, r = pcall(json.decode, line)                -- a line cut off by a crash is skipped
+        if ok and type(r) == "table" then
+            if r.op == "add" and type(r.e) == "table" then
+                local e = U26.pjFromRecord(r.e)
+                if e and not byId[e.id] then list[#list + 1] = e; byId[e.id] = e end
+            elseif r.op == "undo" and type(r.id) == "string" and byId[r.id] then
+                local e = byId[r.id]
+                e.undone, e.undone_at = true, U26.psInt(r.at)
+            end
+        end
+    end
+    table.sort(list, function(a, b) return a.seq < b.seq end)
+    serverState.patches, serverState.patch_bytes = list, 0
+    for _, e in ipairs(list) do
+        serverState.patch_bytes = serverState.patch_bytes + e.cost
+        if e.seq > serverState.patch_seq then serverState.patch_seq = e.seq end
+    end
+    U26.pjTrim()
+    U26.pjRewrite()
+    return #list
 end
 
 -- Runs one write handler and journals it when it succeeded.
@@ -9802,9 +10055,9 @@ function U26.pjWrap(handlers)
 end
 
 -- live state of one entry: applied | changed | undone | unreadable | other_process | not_undoable
-function U26.pjState(e, pid)
+function U26.pjState(e, pr)
     if e.undone then return "undone" end
-    if e.pid ~= pid then return "other_process" end
+    if not U26.pjSame(e, pr) then return "other_process" end
     if e.undoable == false then return "not_undoable" end
     if e.kind == "script" then return "applied" end
     local cur = U26.rd(e.address, e.size)
@@ -9812,8 +10065,8 @@ function U26.pjState(e, pid)
     return cur == e.written and "applied" or "changed"
 end
 
-function U26.pjView(e, pid, mods)
-    local v = { id = e.id, method = e.method, kind = e.kind, at = e.at, pid = e.pid, state = U26.pjState(e, pid),
+function U26.pjView(e, pr, mods)
+    local v = { id = e.id, method = e.method, kind = e.kind, at = e.at, pid = e.pid, process = e.process, state = U26.pjState(e, pr),
                 undoable = e.undoable ~= false and not e.undone, reason = e.reason }
     if e.kind == "bytes" then
         v.address, v.size = U26.hex(e.address), e.size
@@ -9837,10 +10090,9 @@ end
 -- Undo one entry. Returns { id, ok, state?, reason?, conflict? }
 function U26.pjUndoOne(e, force)
     local out = { id = e.id }
-    local pid = getOpenedProcessID()
     if e.undone then out.reason = "already undone"; return out end
-    if e.pid ~= pid then
-        out.reason = "made in another process (pid " .. tostring(e.pid) .. "): the target was restarted or CE is attached elsewhere"
+    if not U26.pjSame(e, U26.psProcess()) then
+        out.reason = "made in another process (" .. tostring(e.process or "pid") .. " " .. tostring(e.pid) .. "): the target was restarted or CE is attached elsewhere"
         return out
     end
     if e.undoable == false then out.reason = e.reason; return out end
@@ -9863,22 +10115,24 @@ function U26.pjUndoOne(e, force)
         if U26.rd(e.address, e.size) ~= e.original then out.reason = "the original bytes did not stick (write-protected?)"; return out end
     end
     e.undone, e.undone_at = true, os.time()
+    U26.pjAppend({ op = "undo", id = e.id, at = e.undone_at })
     out.ok = true
     return out
 end
 
 function cmd_list_patches(params)
-    local pid = getOpenedProcessID()
+    local pr = U26.psProcess()
     local mods = U26.listModules()
     local items = {}
     local list = serverState.patches
     for i = #list, 1, -1 do                                -- newest first
         local e = list[i]
-        if not (params.active_only == true and e.undone) then items[#items + 1] = U26.pjView(e, pid, mods) end
+        if not (params.active_only == true and e.undone) then items[#items + 1] = U26.pjView(e, pr, mods) end
     end
     local limit, offset, page, total = paginate(params, items, 50)
+    local path, saveErr = U26.stInfo(U26.PJ_FILE)
     return { success = true, total = total, offset = offset, limit = limit, returned = #page, patches = page,
-             dropped = serverState.patch_dropped > 0 and serverState.patch_dropped or nil }
+             dropped = serverState.patch_dropped > 0 and serverState.patch_dropped or nil, saved_to = path, save_error = saveErr }
 end
 
 -- undo_patch(id) or undo_patch(all=true): newest first, stops nothing on a failure (each result is reported)
@@ -9888,11 +10142,11 @@ function cmd_undo_patch(params)
     local force = params.force == true
     if params.all == true then
         local results, undone, failed = {}, 0, 0
-        local pid = getOpenedProcessID()
+        local pr = U26.psProcess()
         local list = serverState.patches
         for i = #list, 1, -1 do
             local e = list[i]
-            if not e.undone and e.pid == pid and e.undoable ~= false then
+            if not e.undone and U26.pjSame(e, pr) and e.undoable ~= false then
                 local r = U26.pjUndoOne(e, force)
                 results[#results + 1] = r
                 if r.ok then undone = undone + 1 else failed = failed + 1 end
@@ -9911,6 +10165,32 @@ function cmd_undo_patch(params)
     end
     return { success = false, id = e.id, error = r.reason, error_code = "INVALID_PARAMS", conflict = r.conflict }
 end
+
+-- drop_patches(which = "inactive" | "all"): forget journal entries. The target's memory is not touched; a forgotten
+-- patch can no longer be undone. "inactive" = undone, made in another process, or not undoable.
+function cmd_drop_patches(params)
+    local which = params.which or "inactive"
+    if which ~= "inactive" and which ~= "all" then
+        return U26.err("which must be 'inactive' (undone, other process, not undoable) or 'all'")
+    end
+    local pr = U26.psProcess()
+    local keep, dropped = {}, 0
+    serverState.patch_bytes = 0
+    for _, e in ipairs(serverState.patches) do
+        local st = which == "all" and "all" or U26.pjState(e, pr)
+        if st == "all" or st == "undone" or st == "other_process" or st == "not_undoable" then
+            dropped = dropped + 1
+        else
+            keep[#keep + 1] = e
+            serverState.patch_bytes = serverState.patch_bytes + e.cost
+        end
+    end
+    serverState.patches = keep
+    U26.pjRewrite()
+    return { success = true, dropped = dropped, kept = #keep }
+end
+
+U26.pjLoad()
 
 -- >>> END UNIT-31 <<<
 
@@ -10192,6 +10472,7 @@ local commandHandlers = {
     -- >>> BEGIN UNIT-31 <<<
     list_patches        = cmd_list_patches,
     undo_patch          = cmd_undo_patch,
+    drop_patches          = cmd_drop_patches,
     -- >>> END UNIT-31 <<<
 }
 serverState.dispatch = commandHandlers   -- used by cmd_batch / cmd_bridge_status

@@ -3128,7 +3128,9 @@ def compare_pointer_paths(target: str, name: str = "", chains: list[dict] = None
 
 @mcp.tool()
 def list_pointer_sets() -> str:
-    """List the stored pointer chain sets (name, chain_count, runs, history of the runs that produced them)."""
+    """List the stored pointer chain sets (name, chain_count, runs, history of the runs that produced them).
+    Sets are saved to a file (saved_to; save_error if that failed), so they survive a reload of the bridge and a restart
+    of Cheat Engine."""
     return format_result(ce_client.send_command("list_pointer_sets"))
 
 
@@ -3153,8 +3155,11 @@ def list_patches(active_only: bool = False, offset: int = 0, limit: int = 50) ->
     """The patch journal: every write made through write_memory, write_integer, write_string, copy_memory (with a dest)
     and auto_assemble, newest first, with the bytes it replaced and a live `state`:
     applied (still in memory) | changed (something wrote over it since) | undone | not_undoable (see `reason`) |
-    other_process (made before the target restarted) | unreadable. Each write tool's reply carries its `patch_id`.
-    Not journaled: memory records, kernel/physical writes, injected code. The journal is lost when the bridge reloads."""
+    other_process (made in an earlier instance of the target, or another program with the same pid) | unreadable.
+    Each write tool's reply carries its `patch_id`. Not journaled: memory records, kernel/physical writes, injected code.
+    The journal is saved to a file (saved_to; save_error if that failed): after a reload of the bridge or a restart of
+    CE, byte patches can still be undone while the same process is attached; script patches cannot (CE's disable
+    information is not saved)."""
     return format_result(ce_client.send_command("list_patches", _params(active_only=active_only or None, offset=offset or None, limit=limit)))
 
 
@@ -3169,6 +3174,17 @@ def undo_patch(id: str = "", all: bool = False, force: bool = False) -> str:
                it such an undo is refused with conflict=true, so a newer patch is never silently torn out underneath.
     """
     return format_result(ce_client.send_command("undo_patch", _params(id=id, all=all or None, force=force or None)))
+
+
+@mcp.tool()
+def drop_patches(which: str = "inactive") -> str:
+    """Forget patch journal entries; the target's memory is not touched, but a forgotten patch can no longer be undone.
+
+    Args:
+        which: "inactive" (default) forgets the undone ones, those made in another process and those that cannot be
+               undone; "all" empties the journal.
+    """
+    return format_result(ce_client.send_command("drop_patches", {"which": which}))
 
 # >>> END UNIT-31 <<<
 
