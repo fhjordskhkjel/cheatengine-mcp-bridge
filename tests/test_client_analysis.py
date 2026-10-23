@@ -231,6 +231,36 @@ need = ["pe_info", "get_halted_state", "pe_functions", "recover_struct", "pe_imp
         "import_names", "rtti_scan_module", "find_string_refs", "find_xrefs", "find_code_caves", "find_pointer_path", "snapshot_region", "list_snapshots",
         "delete_snapshot", "diff_snapshots", "compare_pointer_paths", "list_pointer_sets", "get_pointer_set", "drop_pointer_set", "list_patches", "undo_patch", "drop_patches"]
 check("all new tools registered with MCP", all(n in tools for n in need), [n for n in need if n not in tools])
+
+
+def _titles(node, path=""):
+    if isinstance(node, dict):
+        found = [path] if isinstance(node.get("title"), str) else []
+        for k, v in node.items():
+            found += _titles(v, path + "/" + k)
+        return found
+    if isinstance(node, list):
+        return [p for i, v in enumerate(node) for p in _titles(v, "%s/%d" % (path, i))]
+    return []
+
+
+with_titles = {n: _titles(t.parameters) for n, t in tools.items() if _titles(t.parameters)}
+check("tool schemas carry no generated titles", not with_titles, dict(list(with_titles.items())[:3]))
+fw = tools["find_window"].parameters["properties"]
+check("a parameter called title is kept", "title" in fw and "class_name" in fw, fw)
+with_output = sorted(n for n, t in tools.items() if t.output_schema is not None)
+check("no tool declares an output schema (results are not sent twice)", not with_output, with_output[:5])
+
+
+def _indented(desc):        # every continuation line still carries the docstring's source indentation
+    rest = [l for l in (desc or "").splitlines()[1:] if l.strip()]
+    return bool(rest) and all(l.startswith("    ") for l in rest)
+
+
+indented = sorted(n for n, t in tools.items() if _indented(t.description))
+check("descriptions are dedented", not indented, indented[:5])
+check("schemas keep types and defaults", tools["drop_patches"].parameters["properties"]["which"] == {"default": "inactive", "type": "string"},
+      tools["drop_patches"].parameters["properties"]["which"])
 check("diff_snapshots schema", tools["diff_snapshots"].parameters["properties"]["snapshots"]["type"] == "array", tools["diff_snapshots"].parameters)
 check("find_xrefs requires address", tools["find_xrefs"].parameters.get("required") == ["address"], tools["find_xrefs"].parameters.get("required"))
 check("compare_pointer_paths requires only target", tools["compare_pointer_paths"].parameters.get("required") == ["target"], tools["compare_pointer_paths"].parameters.get("required"))

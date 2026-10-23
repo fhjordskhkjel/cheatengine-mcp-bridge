@@ -939,28 +939,19 @@ def dissect_structure(address: str, size: int = 256) -> str:
 @mcp.tool()
 def set_breakpoint(address: str, id: str = None, capture_registers: bool = True, capture_stack: bool = False, stack_depth: int = 16,
                    condition: str = "", mode: str = "log", max_hits: int = 0, halt_timeout_ms: int = 0, inspect: list[dict] = None) -> str:
-    """Set a hardware execution breakpoint (a debug register: invisible to most anti-cheat, at most 4 at a time).
-
-    By default it only LOGS: every hit records registers (and optionally the stack) and the thread keeps running;
-    read them with get_breakpoint_hits.
+    """Hardware execution breakpoint (debug register; at most 4 at once). Default mode "log": each hit
+    records registers (optionally the stack) and the thread keeps running; read hits with get_breakpoint_hits.
 
     Args:
-        address: Address or symbol.
-        id: Name for the breakpoint (default: the address; a clash gets a _2 suffix).
-        capture_registers / capture_stack / stack_depth: What to record per hit.
-        condition: Only record hits where this expression is true, e.g. "RAX == 5", "u32(RDX+8) == 0x1234 and RCX ~= 0",
-                   "f32(RSP+0x20) > 100". It sees the registers (RAX..R15, RIP, EFLAGS; x86: EAX..), the memory readers
-                   u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 ptr (return nil for unreadable memory), hits() (matched so far),
-                   seen() (all hits) and abs/min/max/floor. Nothing else (no os/io/load), and it runs under an
-                   instruction budget so it cannot hang the target. A condition that errors still records the hit,
-                   flagged with `condition_error`, and is switched off after 5 failures.
-        mode: "log" (default) or "break": leave the thread STOPPED for inspection. Use get_halted_state to look at it
-              and debug_continue (run / step_into / step_over) to resume. A watchdog resumes it by itself after
-              halt_timeout_ms so a vanished client can never leave the game frozen.
-        max_hits: Detach automatically after this many matching hits (0 = unlimited).
-        halt_timeout_ms: Watchdog timeout for mode "break" (default 10000, max 300000).
-        inspect: For mode "break": [{"expr": "RDX+0x10", "size": 32}] memory to capture at the moment of the hit
-                 (the address is an expression like a condition; at most 8 entries, 256 bytes each).
+        id: Breakpoint name (default: the address).
+        condition: Record only hits where this is true, e.g. "RAX == 5", "u32(RDX+8) == 0x1234 and RCX ~= 0". Sees the
+                   registers, memory readers u8..u64 i8..i64 f32 f64 ptr (nil if unreadable), hits(), seen(),
+                   abs/min/max/floor; nothing else. Runs under an instruction budget; an erroring condition records
+                   the hit with condition_error and is disabled after 5 failures.
+        mode: "break" leaves the thread STOPPED: inspect it with get_halted_state, resume with debug_continue. A
+              watchdog resumes it after halt_timeout_ms (default 10000, max 300000) so the target never stays frozen.
+        max_hits: Remove the breakpoint after this many matching hits (0 = unlimited).
+        inspect: mode "break" only: [{"expr": "RDX+0x10", "size": 32}] memory captured at the hit (max 8 x 256 bytes).
     """
     return format_result(ce_client.send_command("set_breakpoint", _params(
         address=address, id=id, capture_registers=capture_registers, capture_stack=capture_stack, stack_depth=stack_depth,
@@ -970,17 +961,15 @@ def set_breakpoint(address: str, id: str = None, capture_registers: bool = True,
 @mcp.tool()
 def set_data_breakpoint(address: str, id: str = None, access_type: str = "w", size: int = 4,
                         condition: str = "", mode: str = "log", max_hits: int = 0, halt_timeout_ms: int = 0, inspect: list[dict] = None) -> str:
-    """Set a hardware data breakpoint (watchpoint): finds what writes/accesses a value.
+    """Hardware data breakpoint (watchpoint): what writes or accesses a value.
 
     Args:
-        address: Address to watch. It must be aligned to `size`.
-        access_type: 'w' (writes, default) or 'rw' (reads and writes); 'r' is an approximation because x86 debug
-                     registers cannot watch reads only: it watches both and drops hits where the value changed.
-        size: 1, 2, 4 (default) or 8 bytes.
+        address: Must be aligned to size.
+        access_type: "w" (default) or "rw"; "r" watches both and drops hits that changed the value.
+        size: 1, 2, 4 (default) or 8.
         condition / mode / max_hits / halt_timeout_ms / inspect: as for set_breakpoint.
 
-    Each hit records the value (read with the watched size), previous_value, value_changed (a write of the same value
-    shows value_changed=false), the registers and the instruction that touched it.
+    Each hit records value, previous_value, value_changed, the registers and the instruction.
     """
     return format_result(ce_client.send_command("set_data_breakpoint", _params(
         address=address, id=id, access_type=access_type, size=size,
@@ -2622,19 +2611,16 @@ def bridge_status() -> str:
 
 @mcp.tool()
 def read_struct(address: str, fields: list[dict]) -> str:
-    """Read several typed fields of a structure with ONE memory read (much cheaper than many read_integer calls).
+    """Read several typed fields with ONE memory read (much cheaper than many read_integer calls).
 
     Args:
-        address: Address of the structure (hex string or symbol).
-        fields: List of {"name": str, "type": str, "offset": int (optional), "size": int (optional)}.
-                `offset` defaults to the end of the previous field (packed, no padding), so give explicit
-                offsets for real structs. Types: i8 u8 i16 u16 i32 u32 i64 u64 f32 f64 ptr bool bytes
-                cstring wstring (aliases: byte word dword qword float double int short pointer string utf16).
-                `size` is the byte length for bytes/cstring and the character count for wstring.
+        fields: [{"name", "type", "offset"?, "size"?}]. Without offset a field follows the previous one (packed), so
+                give offsets for real structs. Types: i8 u8 i16 u16 i32 u32 i64 u64 f32 f64 ptr bool bytes cstring
+                wstring (also byte word dword qword float double int short pointer string utf16). size = byte length
+                for bytes/cstring, characters for wstring.
 
-    Returns JSON with: success, address, span, arch, fields[{name, type, offset, value, hex?, error?}].
-    u64 values above 2^63 and all pointers are returned as hex strings. A field that cannot be read gets
-    an `error` instead of failing the whole call. Limits: 512 fields, 64 KB span.
+    Returns fields[{name, type, offset, value, hex?, error?}]; pointers and u64 > 2^63 as hex. An unreadable field gets
+    an error instead of failing the call. Max 512 fields, 64 KB span.
     """
     return format_result(ce_client.send_command("read_struct", {"address": address, "fields": fields}))
 
@@ -2668,21 +2654,16 @@ def batch_commands(requests: list[dict], stop_on_error: bool = False) -> str:
 
 @mcp.tool()
 def start_job(kind: str, params: dict = None) -> str:
-    """Start a long-running operation in the background and return immediately with a job_id.
-
-    CE stays responsive and the MCP call cannot time out. Poll with get_job (or block with wait_for_job),
-    then fetch the data with get_job_result. Up to 4 jobs run at once.
+    """Start a long-running operation in the background; returns a job_id at once (CE stays responsive, the
+    call cannot time out). Poll get_job or block with wait_for_job, then get_job_result. Up to 4 jobs at once.
 
     Args:
-        kind: 'scan_all' | 'next_scan' | 'aob_scan' | 'find_references' | 'find_call_references' | 'find_xrefs' |
-              'rtti_scan' | 'find_string_refs' | 'find_code_caves' | 'find_pointer_path'.
-        params: The same parameters the matching blocking tool takes, e.g.
-                scan_all {"value": "100", "type": "dword"}, aob_scan {"pattern": "48 8B ?? 05", "limit": 100},
-                find_references {"address": "0x140001000"}, find_call_references {"address": "game.exe+1234"},
-                find_xrefs {"address": "game.exe+1234", "kinds": "call,jmp"}.
+        kind: scan_all | next_scan | aob_scan | find_references | find_call_references | find_xrefs | rtti_scan |
+              find_string_refs | find_code_caves | find_pointer_path.
+        params: The parameters of the matching blocking tool, e.g. scan_all {"value": "100", "type": "dword"}.
 
-    scan_all/next_scan own the shared scan session: while one runs, scan_all, next_scan and
-    get_scan_results answer error_code BUSY. Cancelling a next_scan discards the scan session.
+    While a scan_all/next_scan job runs, scan_all, next_scan and get_scan_results answer BUSY; cancelling a
+    next_scan discards the scan session.
     """
     return format_result(ce_client.send_command("start_job", {"kind": kind, "params": params or {}}))
 
@@ -2924,30 +2905,18 @@ def find_string_refs(text: str = "", address: str = "", module: str = "", wide: 
 @mcp.tool()
 def find_xrefs(address: str, size: int = 1, module: str = "", kinds: str = "", max_results: int = 5000,
                wait_seconds: float = 30.0, limit: int = 100, offset: int = 0) -> str:
-    """Find everything that references `address` (or the `size` bytes starting there): "who calls this function",
-    "who touches this variable", "which table points at this".
-
-    Finds, in the scanned module(s):
-      call / jmp / jcc  rel32 and short (rel8) branches whose target is in the range
-      rip               x64 rip-relative operands (lea/mov/cmp/call [rip+x] ...); `access` says read | write |
-                        read/write | address (lea) | call | jump
-      abs_code          absolute pointers inside code (x86 push/mov imm32, x64 mov r64,imm64); `address` is the
-                        instruction when one is found and `field_address` the pointer itself
-      abs_data          pointer-aligned absolute pointers in data sections (vtables, pointer tables)
-      rva               32-bit RVAs in data (x64 jump tables); the .pdata exception table is skipped
-    Each reference has address, module+RVA `expression`, section, instruction text and the enclosing function
-    (`function_start`, from .pdata on x64). The result also lists the calling functions with counts (`functions`).
+    """Find what references `address` (or [address, address+size)): who calls a function, who touches a
+    variable, which table points at it. Static references in module code and data: call/jmp/jcc (rel32, rel8), x64
+    rip-relative operands (`access`: read|write|read/write|address|call|jump), absolute pointers in code (abs_code) and
+    data (abs_data), 32-bit RVAs in data (rva). Each hit has address, module+RVA expression, section, instruction and
+    function_start; `functions` counts the referencing functions. Heap/stack pointers are not found (find_pointer_path).
+    Background job; waiting works as in rtti_scan_module.
 
     Args:
-        address: Target address (hex string, symbol or module+offset).
-        size: Treat [address, address+size) as the target - e.g. a whole struct or a function body's first bytes.
-              Absolute pointers inside code are only searched for sizes up to 16.
-        module: Module to scan - a name, "all", or empty for the module that contains `address` (else the main module).
-        kinds: Comma separated subset of call, jmp, jcc, rip, abs, abs_code, abs_data, rva (default: all).
-        max_results: Stop after this many raw hits (default 5000; `truncated` is set when reached).
-
-    Static references only: pointers stored on the heap/stack are not found (use find_pointer_path for those).
-    Background job; see rtti_scan_module for the wait/timeout behaviour.
+        size: Target range length (absolute pointers in code are only searched up to 16).
+        module: A module name, "all", or empty = the module containing address (else the main module).
+        kinds: Comma separated subset of call, jmp, jcc, rip, abs, abs_code, abs_data, rva (default all).
+        max_results: Stop after this many raw hits (default 5000; sets `truncated`).
     """
     return format_result(_run_job("find_xrefs", _params(address=address, size=size if size != 1 else None, module=module,
                                                         kinds=kinds, max_results=max_results if max_results != 5000 else None),
@@ -2966,22 +2935,14 @@ def find_code_caves(module: str = "", byte: int = 204, min_size: int = 16, secti
 def find_pointer_path(address: str, max_depth: int = 3, max_offset: int = 1024, max_per_level: int = 16,
                       max_results: int = 100, protection: str = "+W", save_as: str = "", wait_seconds: float = 30.0,
                       limit: int = 100) -> str:
-    """Find static pointer chains that lead to `address` (a heap/stack value that moves between runs).
+    """Find static pointer chains to `address` (a value that moves between runs) by scanning backwards:
+    each level searches for pointers within max_offset below the current holders (nearby holders share one scan),
+    keeps the best max_per_level, and stops at holders inside a module (the module+RVA base). Every chain is verified.
+    Results: base, offsets (outermost first), expression ("[[game.exe+0x1234]+0x40]+0x100"). Far less thorough than
+    CE's pointer scanner; each scan covers the whole process (seconds to minutes).
 
-    Works backwards: each level runs one memory scan for pointers whose value lies within `max_offset` below the
-    address, keeps the best `max_per_level` non-static holders and repeats, up to `max_depth` levels, until a holder
-    lies inside a module (that module+RVA is the static base). Every chain is re-resolved to verify it reaches the
-    address. Each result has `base` ("module+0xRVA"), `offsets` (outermost first), `expression`
-    ("[[game.exe+0x1234]+0x40]+0x100") and `verified`.
-
-    This is a plain reverse scan, far less thorough than Cheat Engine's pointer scanner; expect a handful of chains,
-    each costing one full memory scan per frontier address (seconds to minutes in big processes).
-
-    Two-run workflow: pass `save_as="hp"` to keep the verified chains in a named set inside the bridge. After the target
-    restarts and you have found the same value again, compare_pointer_paths(target=<new address>, name="hp") keeps only
-    the chains that still reach it (save_as there narrows the set; run it again after a third start). The stored set
-    survives target restarts, not a reload of the bridge script.
-    Background job; see rtti_scan_module for the wait/timeout behaviour, and use cancel_job to stop it.
+    save_as="hp" keeps the chains as a pointer set for compare_pointer_paths after the target restarts (sets are saved
+    to disk and survive reloads). Background job; waiting works as in rtti_scan_module, cancel_job stops it.
     """
     return format_result(_run_job("find_pointer_path", _params(
         address=address, max_depth=max_depth, max_offset=max_offset, max_per_level=max_per_level,
@@ -3014,20 +2975,16 @@ def delete_snapshot(name: str = "", all: bool = False) -> str:
 @mcp.tool()
 def diff_snapshots(snapshots: list[str], pattern: str = "", unit: int = 4, offset: int = 0, length: int = 0,
                    merge_gap: int = 0, limit: int = 200) -> str:
-    """Compare 2+ snapshots of the same region ("live" may be used for the current memory) and list the units that
-    behave as expected - the 'unknown value' workflow without scans.
+    """Compare 2+ snapshots of one region ("live" = current memory) and list the units that changed as
+    described: the unknown-value workflow without scans.
 
     Args:
         snapshots: Names in time order, e.g. ["before", "after_hit", "after_heal"].
-        pattern: One character per consecutive pair: C = must have changed, U = must be unchanged, ? = don't care.
-                 Default: all C. ["a","b","c"] with "CU" = changed between a and b, then stable (b == c).
-        unit: Compare in 1, 2, 4 (default) or 8 byte units; 4 also shows float views, 8 double views.
-        offset, length: Restrict to a sub-range of the region (bytes).
-        merge_gap: Adjacent matches closer than this many bytes are merged in `groups` (default = unit).
-        limit: Max matches returned (total_matches always counts all).
+        pattern: One letter per consecutive pair: C changed, U unchanged, ? any (default all C).
+        unit: 1, 2, 4 (default, adds float views) or 8 (double views) bytes.
+        offset, length: Sub-range of the region. merge_gap: merge matches this close into `groups` (default unit).
 
-    Returns total_matches, matches[{address, offset, old, new, values?, old_float/new_float...}] and
-    groups[{address, offset, size, units}] that point to likely fields.
+    Returns total_matches, matches[{address, offset, old, new, ...}] and groups (likely fields).
     """
     return format_result(ce_client.send_command("diff_snapshots", _params(
         snapshots=snapshots, pattern=pattern, unit=unit, offset=offset or None, length=length or None,
@@ -3039,15 +2996,10 @@ def diff_snapshots(snapshots: list[str], pattern: str = "", unit: int = 4, offse
 
 @mcp.tool()
 def pe_functions(module: str = "", address: str = "", offset: int = 0, limit: int = 100, include_unwind: bool = False) -> str:
-    """x64 function table (.pdata): every function with unwind data, or the exact function containing `address`.
-
-    With `address`: begin/end/size, `expression` ("module+0xRVA"), the exception handler address and the unwind info
-    (prolog size, frame register, flags EHANDLER/UHANDLER/CHAININFO). Split ("cold") fragments are resolved to their
-    primary function and described in `fragment`. found=false means the address is not covered: leaf functions that
-    never touch the stack have no entry, so use find_function_boundaries for the heuristic fallback.
-    Without `address`: a page of the table (`total`, `offset`, `limit`); include_unwind adds prolog/handler info per entry.
-    The module defaults to the one containing `address`, else the main module. x86 modules have no function table
-    (available=false).
+    """x64 function table (.pdata) of a module (default: the one containing address, else the main module).
+    With `address`: the function containing it (begin/end/size, expression, handler, unwind info; cold fragments are
+    resolved to their primary function). found=false: no entry (leaf function), use find_function_boundaries.
+    Without: a page of the table; include_unwind adds prolog/handler info. x86 modules have none (available=false).
     """
     return format_result(ce_client.send_command("pe_functions", _params(
         module=module, address=address, offset=offset, limit=limit, include_unwind=include_unwind or None)))
@@ -3055,25 +3007,18 @@ def pe_functions(module: str = "", address: str = "", offset: int = 0, limit: in
 @mcp.tool()
 def recover_struct(address: str = "", addresses: list[str] = None, size: int = 0, name: str = "", create: bool = False,
                    max_vtable_entries: int = 0) -> str:
-    """Recover a class layout from live instance(s) of a polymorphic MSVC class.
-
-    The object's vtable pointer (offset 0) leads to its RTTI: class name, base classes (with subobject offsets) and the
-    virtual function table (each virtual function with its address and, on x64, exact size from .pdata). The fields are
-    inferred by dissecting the memory: pointers (typed as `ClassName *` when they point at another RTTI object, `char *`
-    for text, vfptr for secondary vtables, module+RVA for static data), floats, doubles, ints, inline char buffers and
-    zero gaps. Pass several instances of the SAME class in `addresses` for much better guesses: values that differ are
-    data, the all-zero tail is trimmed and mixed classes are refused.
+    """Recover the layout of a polymorphic MSVC class from live instance(s): RTTI class name, bases,
+    vtable and virtual functions (x64: exact sizes from .pdata), and fields inferred from memory (typed pointers,
+    floats, doubles, ints, inline text, zero gaps). Several instances of the SAME class give much better guesses.
 
     Args:
-        address / addresses: Object address(es), 1 to 16 instances of one class.
+        address / addresses: 1 to 16 object addresses of one class.
         size: Bytes to analyse (default 0x100, max 0x4000; the all-zero tail is dropped).
-        name: Name for the CE structure when create=true (default: the class name).
-        create: Also create the CE structure definition (visible in the Structures list; for strings it sets the byte size).
-        max_vtable_entries: Cap for the virtual function listing (default 64).
+        create: Also create a CE structure (named `name`, default the class name).
+        max_vtable_entries: Cap for the virtual function list (default 64).
 
-    Returns class_name, bases, vtable, fields[{offset,size,kind,type,name,samples}], virtual_functions, c_declaration
-    (ready for IDA's declare_c_type) and, with create, structure_id. This is a heuristic: ints that look like floats (or
-    the reverse), and two floats at an 8-aligned offset, can be misjudged; check the samples.
+    Returns class_name, bases, vtable, fields[{offset,size,kind,type,name,samples}], virtual_functions and a
+    c_declaration for IDA. Heuristic: check the samples (int/float and float pairs can be misjudged).
     """
     return format_result(ce_client.send_command("recover_struct", _params(
         address=address, addresses=addresses, size=size or None, name=name, create=create or None,
@@ -3098,28 +3043,20 @@ def get_halted_state(stack_depth: int = 16, extend_ms: int = 0) -> str:
 @mcp.tool()
 def compare_pointer_paths(target: str, name: str = "", chains: list[dict] = None, save_as: str = "", near_delta: int = 256,
                           near_limit: int = 10, offset: int = 0, limit: int = 100) -> str:
-    """Two-run pointer path comparison: which pointer chains from an earlier run still reach the value now?
-
-    Run 1: find_pointer_path(address, save_as="hp") stores the chains of the value you found (or pass chains from
-    Cheat Engine's pointer scanner inline, with `target` = the address they point to in the CURRENT process).
-    Restart the target, find the same value again (scan, or any other way), then call this with `target` = its new
-    address. Every chain is re-resolved from its module+RVA base in the new process; the ones that land exactly on
-    `target` have survived a restart. Run it once more after another restart: the survivors then carry runs=3.
+    """Two-run pointer comparison: which chains from an earlier run still reach the value now?
+    Run 1: find_pointer_path(save_as="hp") (or pass chains from CE's pointer scanner). Restart the target, find the
+    value again, then call this with `target` = its new address: chains are re-resolved from their module+RVA base and
+    those landing exactly on target survive (runs+1). Reads memory only.
 
     Args:
         target: Address of the same value in the current process.
-        name: A stored set (list_pointer_sets). Give this OR chains, not both.
-        chains: Inline [{"base": "game.exe+0x1A2B3C" | address, "offsets": [0x40, 0x10]}]. Offsets are applied after each
-                dereference, outermost first (CE convention). An absolute base inside a module is stored module-relative.
-        save_as: Store the survivors under this name (same name as `name` narrows the set in place). Without it nothing
-                 is stored. An empty result never overwrites a set.
-        near_delta, near_limit: Chains that resolve to within +-near_delta bytes of target are reported as near_misses
-                 with a suggested_offsets correction (a patch that moved the last field); up to near_limit shown.
-        offset, limit: page through the surviving chains.
+        name / chains: A stored set (list_pointer_sets) OR inline [{"base": "game.exe+0x1A2B3C" | address,
+                "offsets": [0x40, 0x10]}] (offsets outermost first, applied after each dereference).
+        save_as: Store the survivors under this name (= name narrows that set). Empty results never overwrite a set.
+        near_delta, near_limit: Chains ending within +-near_delta bytes are listed as near_misses with suggested_offsets.
 
-    Returns hits (survivors), missed (resolved elsewhere), unreadable (a pointer on the way could not be read),
-    module_missing, same_process (true when the target was not restarted since the last run: weaker evidence), and
-    chains[] sorted by runs (most confirmed first), then shortest/smallest. Reads memory only.
+    Returns hits, missed, unreadable, module_missing, same_process (target not restarted: weak evidence) and the
+    surviving chains, most-confirmed first.
     """
     return format_result(ce_client.send_command("compare_pointer_paths", _params(
         target=target, name=name, chains=chains, save_as=save_as, near_delta=near_delta if near_delta != 256 else None,
@@ -3152,14 +3089,12 @@ def drop_pointer_set(name: str = "", all: bool = False) -> str:
 
 @mcp.tool()
 def list_patches(active_only: bool = False, offset: int = 0, limit: int = 50) -> str:
-    """The patch journal: every write made through write_memory, write_integer, write_string, copy_memory (with a dest)
-    and auto_assemble, newest first, with the bytes it replaced and a live `state`:
-    applied (still in memory) | changed (something wrote over it since) | undone | not_undoable (see `reason`) |
-    other_process (made in an earlier instance of the target, or another program with the same pid) | unreadable.
-    Each write tool's reply carries its `patch_id`. Not journaled: memory records, kernel/physical writes, injected code.
-    The journal is saved to a file (saved_to; save_error if that failed): after a reload of the bridge or a restart of
-    CE, byte patches can still be undone while the same process is attached; script patches cannot (CE's disable
-    information is not saved)."""
+    """The patch journal, newest first: every write through write_memory, write_integer, write_string,
+    copy_memory (with dest) and auto_assemble, with the bytes it replaced (a write's reply carries its patch_id).
+    state: applied | changed (overwritten since) | undone | not_undoable (see reason) | other_process | unreadable.
+    Not journaled: memory records, kernel/physical writes, injected code. Saved to disk (saved_to): after a reload of
+    the bridge byte patches stay undoable while the same process is attached; script patches do not.
+    """
     return format_result(ce_client.send_command("list_patches", _params(active_only=active_only or None, offset=offset or None, limit=limit)))
 
 
@@ -3232,6 +3167,34 @@ _unlisted = POLICY.apply(mcp)
 if POLICY.profile != "full" or POLICY.groups is not None or POLICY.allow or POLICY.deny:
     debug_log("policy: profile=%s toolset=%s -> %d tools listed, %d hidden"
               % (POLICY.profile, ",".join(sorted(POLICY.groups)) if POLICY.groups else "all", len(ALL_TOOLS) - len(_unlisted), len(_unlisted)))
+
+
+from inspect import cleandoc as _cleandoc
+
+
+def _drop_schema_titles(node):
+    """pydantic gives every argument a title that only repeats its name ("address" -> "Address") and every schema a
+    "<tool>Arguments" title. A client needs neither, and they are about a third of the tool schemas sent each session.
+    Only string titles go: a parameter that is itself called `title` (find_window) is a dict and stays."""
+    if isinstance(node, dict):
+        if isinstance(node.get("title"), str):
+            del node["title"]
+        for v in node.values():
+            _drop_schema_titles(v)
+    elif isinstance(node, list):
+        for v in node:
+            _drop_schema_titles(v)
+
+
+# Every tool returns one JSON text. The MCP SDK would also declare an outputSchema for that str ({"result": str}) and send
+# each result twice, as text and again as structuredContent: no information, double the tokens. This is what
+# @mcp.tool(structured_output=False) does, applied to all tools at once.
+for _tool in mcp._tool_manager.list_tools():
+    _drop_schema_titles(_tool.parameters)
+    if _tool.description:                       # docstrings carry their source indentation on every line
+        _tool.description = _cleandoc(_tool.description)
+    if _tool.fn_metadata.output_schema is not None:
+        _tool.fn_metadata = type(_tool.fn_metadata)(arg_model=_tool.fn_metadata.arg_model)
 
 # >>> END UNIT-29 <<<
 
