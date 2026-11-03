@@ -311,6 +311,7 @@ Check these in order:
 |----------|---------|---------|
 | `CE_MCP_TIMEOUT` | `30` | Timeout (seconds) for each MCP tool call; `<=0` disables it. A timed-out command is not retried and may still be running in Cheat Engine, so raise this for long scans. |
 | `CE_MCP_ALLOW_SHELL` | *unset* | Set to `1` to enable `run_command` / `shell_execute` tools. **Arbitrary code execution risk** — leave unset by default. |
+| `CE_MCP_TOOLSETS` | `all` | Comma-separated tool groups to register: `process` (always on), `memory`, `scan`, `analysis`, `debug`, `kernel`, `scripting`, `table`, `gui`, `system`. All 176 tool schemas cost a lot of context on every turn; e.g. `memory,scan,analysis,debug` keeps the reverse-engineering core (~100 tools). The `list_toolsets` tool shows what each group contains and what is disabled. |
 
 ---
 
