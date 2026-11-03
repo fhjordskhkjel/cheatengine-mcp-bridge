@@ -26,6 +26,13 @@ local serverState = {
 
 local function toHex(num)
     if not num then return "nil" end
+    if math.type(num) == "float" then
+        -- string.format("%X") raises on non-integral floats ("number has no
+        -- integer representation"), which used to abort the whole command.
+        local i = (num == num) and math.tointeger(math.floor(num)) or nil
+        if not i then return tostring(num) end
+        num = i
+    end
     if num >= 0 and num <= 0xFFFFFFFF then
         return string.format("0x%08X", num)
     else
@@ -106,6 +113,10 @@ local function captureStack(depth)
     local stackPtr = arch.stackPtr
     if not stackPtr then return stack end
     
+    -- stack[1] is [SP+0], stack[n] is [SP+(n-1)*ptrSize]. This used to be
+    -- 0-based, and the array encoder starts at 1, so [SP+0] (the return
+    -- address on a function-entry breakpoint) was silently dropped.
+    -- Unreadable slots encode as null so indices stay aligned.
     for i = 0, depth - 1 do
         local val
         if arch.is64bit then
@@ -113,7 +124,7 @@ local function captureStack(depth)
         else
             val = readInteger(stackPtr + i * arch.ptrSize)
         end
-        if val then stack[i] = toHex(val) end
+        stack[i + 1] = val and toHex(val) or nil
     end
     return stack
 end
@@ -130,6 +141,61 @@ local function paginate(params, items, defaultLimit)
         page[#page + 1] = items[i]
     end
     return limit, offset, page, total
+end
+
+-- Breakpoint hit buffers are ring buffers: only the newest max_hits entries
+-- are kept per breakpoint, so a breakpoint on a hot path cannot grow CE's
+-- memory without bound or produce a response larger than the frame cap.
+local DEFAULT_MAX_BP_HITS = 1000
+
+local function parseMaxHits(value)
+    local n = tonumber(value) or DEFAULT_MAX_BP_HITS
+    return math.max(1, math.min(math.floor(n), 100000))
+end
+
+-- Append a hit for bpId. Creates the buffer lazily: get_breakpoint_hits(clear)
+-- may have replaced serverState.breakpoint_hits while the breakpoint is live.
+local function recordBreakpointHit(bpId, hitData)
+    local hits = serverState.breakpoint_hits[bpId]
+    if not hits then
+        hits = {}
+        serverState.breakpoint_hits[bpId] = hits
+    end
+    local bp = serverState.breakpoints[bpId]
+    local maxHits = (bp and bp.max_hits) or DEFAULT_MAX_BP_HITS
+    if bp then
+        bp.hit_count = (bp.hit_count or 0) + 1
+        hitData.hit_number = bp.hit_count
+    end
+    hits[#hits + 1] = hitData
+    while #hits > maxHits do
+        table.remove(hits, 1)
+        if bp then bp.dropped_hits = (bp.dropped_hits or 0) + 1 end
+    end
+end
+
+-- Run a breakpoint's capture function, always resuming the target afterwards.
+-- An error inside capture used to skip debug_continueFromBreakpoint and leave
+-- the target thread suspended; now it is recorded as a hit with an error field.
+local function handleBreakpointHit(bpId, addr, capture)
+    local ok, err = pcall(function() recordBreakpointHit(bpId, capture()) end)
+    if not ok then
+        pcall(recordBreakpointHit, bpId, {
+            id = bpId, address = toHex(addr), timestamp = os.time(),
+            error = "hit capture failed: " .. tostring(err),
+        })
+    end
+    debug_continueFromBreakpoint(co_run)
+    return 1
+end
+
+-- Public stats for a breakpoint record (used by list/get_breakpoint_hits).
+local function breakpointStats(bp)
+    return {
+        hit_count = bp.hit_count or 0,
+        dropped_hits = bp.dropped_hits or 0,
+        max_hits = bp.max_hits or DEFAULT_MAX_BP_HITS,
+    }
 end
 
 -- Map a human-readable scan_option to a CE scan constant.
@@ -408,114 +474,277 @@ end
 -- ============================================================================
 -- JSON LIBRARY (Pure Lua - Complete Implementation)
 -- ============================================================================
-local json = {}
-local encode
+-- Wire-format rules (both directions are UTF-8 JSON):
+--   * Lua integers are emitted with %d so 64-bit values (pointers, qwords,
+--     handles) survive exactly; floats use the shortest of %.14g / %.17g that
+--     round-trips.
+--   * \uXXXX escapes (incl. surrogate pairs) decode to UTF-8; lone surrogates
+--     become U+FFFD.
+--   * Strings are byte strings in CE. Bytes that are not part of a valid UTF-8
+--     sequence are emitted as \u00XX (Latin-1 mapping) so the response is
+--     always valid UTF-8 and the original byte value stays recoverable.
+--   * A table is an array iff all keys are positive integers (holes -> null);
+--     anything else is an object with stringified keys. {} encodes as [].
+-- Wrapped in a function so the codec costs one chunk-level local, not ~20
+-- (Cheat Engine refuses chunks with more than 200 locals).
+local json = (function()
+  local json = {}
+  local encode
+  local floor = math.floor
 
-local escape_char_map = { [ "\\" ] = "\\", [ "\"" ] = "\"", [ "\b" ] = "b", [ "\f" ] = "f", [ "\n" ] = "n", [ "\r" ] = "r", [ "\t" ] = "t" }
-local escape_char_map_inv = { [ "/" ] = "/" }
-for k, v in pairs(escape_char_map) do escape_char_map_inv[v] = k end
-local function escape_char(c) return "\\" .. (escape_char_map[c] or string.format("u%04x", c:byte())) end
-local function encode_nil(val) return "null" end
-local function encode_table(val, stack)
-  local res, stack = {}, stack or {}
-  if stack[val] then error("circular reference") end
-  stack[val] = true
-  if rawget(val, 1) ~= nil or next(val) == nil then
-    for i, v in ipairs(val) do table.insert(res, encode(v, stack)) end
-    stack[val] = nil
-    return "[" .. table.concat(res, ",") .. "]"
-  else
+  local escape_char_map = {
+    ["\\"] = "\\\\", ["\""] = "\\\"", ["\b"] = "\\b", ["\f"] = "\\f",
+    ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t",
+  }
+  local function escape_char(c)
+    return escape_char_map[c] or string.format("\\u%04x", c:byte())
+  end
+
+  -- Length of the valid UTF-8 sequence starting at s[i] (a byte >= 0x80), or nil.
+  local function utf8_seq_len(s, i)
+    local c = s:byte(i)
+    local n
+    if c >= 0xC2 and c <= 0xDF then n = 2
+    elseif c >= 0xE0 and c <= 0xEF then n = 3
+    elseif c >= 0xF0 and c <= 0xF4 then n = 4
+    else return nil end
+    for k = 1, n - 1 do
+      local cc = s:byte(i + k)
+      if not cc or cc < 0x80 or cc > 0xBF then return nil end
+    end
+    local c2 = s:byte(i + 1)
+    if (c == 0xE0 and c2 < 0xA0)       -- overlong 3-byte
+      or (c == 0xED and c2 > 0x9F)     -- UTF-16 surrogates
+      or (c == 0xF0 and c2 < 0x90)     -- overlong 4-byte
+      or (c == 0xF4 and c2 > 0x8F) then -- > U+10FFFF
+      return nil
+    end
+    return n
+  end
+
+  -- Replace bytes that are not valid UTF-8 with \u00XX. Input must already be
+  -- JSON-escaped (escapes are ASCII, so they are never touched here).
+  local function sanitize_utf8(s)
+    local j = s:find("[\128-\255]")
+    if not j then return s end
+    local out, start = {}, 1
+    while j do
+      local n = utf8_seq_len(s, j)
+      if n then
+        j = j + n
+      else
+        out[#out + 1] = s:sub(start, j - 1)
+        out[#out + 1] = string.format("\\u%04x", s:byte(j))
+        j = j + 1
+        start = j
+      end
+      j = s:find("[\128-\255]", j)
+    end
+    out[#out + 1] = s:sub(start)
+    return table.concat(out)
+  end
+
+  local function encode_string(val)
+    return '"' .. sanitize_utf8((val:gsub('[%z\1-\31\\"]', escape_char))) .. '"'
+  end
+
+  local function encode_number(val)
+    if val ~= val or val == math.huge or val == -math.huge then return "null" end
+    if math.type and math.type(val) == "integer" then
+      return string.format("%d", val)
+    end
+    local s = string.format("%.14g", val)
+    if tonumber(s) ~= val then s = string.format("%.17g", val) end
+    return s
+  end
+
+  -- Returns true, maxIndex when every key is a positive integer and the table
+  -- is not absurdly sparse; false otherwise.
+  local function array_extent(t)
+    local n, max = 0, 0
+    for k in pairs(t) do
+      if type(k) ~= "number" or k < 1 or k ~= floor(k) then return false end
+      n = n + 1
+      if k > max then max = k end
+    end
+    if max > n * 2 + 16 then return false end
+    return true, max
+  end
+
+  -- Sentinel that encodes as JSON null. Use it where a nil would otherwise
+  -- vanish, e.g. a trailing nil in an array (Lua cannot store its slot).
+  json.null = setmetatable({}, { __tostring = function() return "json.null" end })
+
+  local function encode_table(val, stack)
+    if val == json.null then return "null" end
+    stack = stack or {}
+    if stack[val] then error("circular reference") end
+    stack[val] = true
+    local res = {}
+    local isArray, max = array_extent(val)
+    if isArray then
+      for i = 1, max do res[i] = encode(val[i], stack) end
+      stack[val] = nil
+      return "[" .. table.concat(res, ",") .. "]"
+    end
     for k, v in pairs(val) do
-      if type(k) ~= "string" then k = tostring(k) end
-      table.insert(res, encode(k, stack) .. ":" .. encode(v, stack))
+      local key = type(k) == "string" and k or tostring(k)
+      res[#res + 1] = encode_string(key) .. ":" .. encode(v, stack)
     end
     stack[val] = nil
     return "{" .. table.concat(res, ",") .. "}"
   end
-end
-local function encode_string(val) return '"' .. val:gsub('[%z\1-\31\\"]', escape_char) .. '"' end
-local function encode_number(val) if val ~= val or val <= -math.huge or val >= math.huge then return "null" end return string.format("%.14g", val) end
-local type_func_map = { ["nil"] = encode_nil, ["table"] = encode_table, ["string"] = encode_string, ["number"] = encode_number, ["boolean"] = tostring, ["function"] = function() return "null" end, ["userdata"] = function() return "null" end }
-encode = function(val, stack) local t = type(val) local f = type_func_map[t] if f then return f(val, stack) end error("unexpected type '" .. t .. "'") end
-json.encode = encode
 
-local function decode_scanwhite(str, pos) return str:find("%S", pos) or #str + 1 end
-local decode
-local function decode_string(str, pos)
-  local startpos = pos + 1
-  local endpos = pos
-  while true do
-    endpos = str:find('["\\]', endpos + 1)
-    if not endpos then return nil, "expected closing quote" end
-    if str:sub(endpos, endpos) == '"' then break end
-    endpos = endpos + 1
+  local type_func_map = {
+    ["nil"] = function() return "null" end,
+    ["table"] = encode_table,
+    ["string"] = encode_string,
+    ["number"] = encode_number,
+    ["boolean"] = tostring,
+    ["function"] = function() return "null" end,
+    ["userdata"] = function() return "null" end,
+  }
+  encode = function(val, stack)
+    local f = type_func_map[type(val)]
+    if f then return f(val, stack) end
+    error("unexpected type '" .. type(val) .. "'")
   end
-  local s = str:sub(startpos, endpos - 1)
-  s = s:gsub("\\.", function(c) return escape_char_map_inv[c:sub(2)] or c end)
-  s = s:gsub("\\u(%x%x%x%x)", function(hex) return string.char(tonumber(hex, 16)) end)
-  return s, endpos + 1
-end
-local function decode_number(str, pos)
-  local numstr = str:match("^-?%d+%.?%d*[eE]?[+-]?%d*", pos)
-  local val = tonumber(numstr)
-  if not val then return nil, "invalid number" end
-  return val, pos + #numstr
-end
-local function decode_literal(str, pos)
-  local word = str:match("^%a+", pos)
-  if word == "true" then return true, pos + 4 end
-  if word == "false" then return false, pos + 5 end
-  if word == "null" then return nil, pos + 4 end
-  return nil, "invalid literal"
-end
-local function decode_array(str, pos)
-  pos = pos + 1
-  local arr, n = {}, 0
-  pos = decode_scanwhite(str, pos)
-  if str:sub(pos, pos) == "]" then return arr, pos + 1 end
-  while true do
-        local val
-        val, pos = decode(str, pos)
-        n = n + 1
-        arr[n] = val
-    pos = decode_scanwhite(str, pos)
-    local c = str:sub(pos, pos)
-    if c == "]" then return arr, pos + 1 end
-    if c ~= "," then return nil, "expected ']' or ','" end
-    pos = decode_scanwhite(str, pos + 1)
+  json.encode = function(val) return encode(val) end
+
+  -- ---------------------------------------------------------------- decoder
+  local function decode_error(str, pos, msg)
+    error(string.format("JSON parse error at byte %d: %s", pos, msg), 0)
   end
-end
-local function decode_object(str, pos)
-  pos = pos + 1
-  local obj = {}
-  pos = decode_scanwhite(str, pos)
-  if str:sub(pos, pos) == "}" then return obj, pos + 1 end
-  while true do
-        local key
-        key, pos = decode_string(str, pos)
-        if not key then return nil, "expected string key" end
-    pos = decode_scanwhite(str, pos)
-    if str:sub(pos, pos) ~= ":" then return nil, "expected ':'" end
-    pos = decode_scanwhite(str, pos + 1)
-        local val
-        val, pos = decode(str, pos)
-        obj[key] = val
-    pos = decode_scanwhite(str, pos)
-    local c = str:sub(pos, pos)
-    if c == "}" then return obj, pos + 1 end
-    if c ~= "," then return nil, "expected '}' or ','" end
-    pos = decode_scanwhite(str, pos + 1)
+
+  local function codepoint_to_utf8(n)
+    if n <= 0x7F then return string.char(n)
+    elseif n <= 0x7FF then
+      return string.char(0xC0 + floor(n / 0x40), 0x80 + n % 0x40)
+    elseif n <= 0xFFFF then
+      return string.char(0xE0 + floor(n / 0x1000), 0x80 + floor(n / 0x40) % 0x40, 0x80 + n % 0x40)
+    else
+      return string.char(0xF0 + floor(n / 0x40000), 0x80 + floor(n / 0x1000) % 0x40,
+                         0x80 + floor(n / 0x40) % 0x40, 0x80 + n % 0x40)
+    end
   end
-end
-local char_func_map = { ['"'] = decode_string, ["{"] = decode_object, ["["] = decode_array }
-setmetatable(char_func_map, { __index = function(t, c) if c:match("%d") or c == "-" then return decode_number end return decode_literal end })
-decode = function(str, pos)
-  pos = pos or 1
-  pos = decode_scanwhite(str, pos)
-  local c = str:sub(pos, pos)
-  return char_func_map[c](str, pos)
-end
-json.decode = decode
+
+  local unescape_map = {
+    ['"'] = '"', ["\\"] = "\\", ["/"] = "/",
+    b = "\b", f = "\f", n = "\n", r = "\r", t = "\t",
+  }
+
+  local function decode_scanwhite(str, pos) return str:find("%S", pos) or #str + 1 end
+  local decode
+
+  -- Single pass so an escaped backslash followed by "u0041" stays literal.
+  local function decode_string(str, pos)
+    if str:sub(pos, pos) ~= '"' then decode_error(str, pos, "expected string") end
+    local buf, i = {}, pos + 1
+    while true do
+      local j = str:find('["\\]', i)
+      if not j then decode_error(str, pos, "unterminated string") end
+      buf[#buf + 1] = str:sub(i, j - 1)
+      if str:sub(j, j) == '"' then return table.concat(buf), j + 1 end
+      local esc = str:sub(j + 1, j + 1)
+      if esc == "u" then
+        local hex = str:match("^%x%x%x%x", j + 2)
+        if not hex then decode_error(str, j, "invalid \\u escape") end
+        local cp = tonumber(hex, 16)
+        i = j + 6
+        if cp >= 0xD800 and cp <= 0xDBFF then
+          local lo = str:match("^\\u(%x%x%x%x)", i)
+          local lcp = lo and tonumber(lo, 16)
+          if lcp and lcp >= 0xDC00 and lcp <= 0xDFFF then
+            cp = 0x10000 + (cp - 0xD800) * 0x400 + (lcp - 0xDC00)
+            i = i + 6
+          else
+            cp = 0xFFFD
+          end
+        elseif cp >= 0xDC00 and cp <= 0xDFFF then
+          cp = 0xFFFD
+        end
+        buf[#buf + 1] = codepoint_to_utf8(cp)
+      else
+        local c = unescape_map[esc]
+        if not c then decode_error(str, j, "invalid escape '\\" .. esc .. "'") end
+        buf[#buf + 1] = c
+        i = j + 2
+      end
+    end
+  end
+
+  local function decode_number(str, pos)
+    local numstr = str:match("^-?%d+%.?%d*[eE]?[+-]?%d*", pos)
+    local val = numstr and tonumber(numstr)
+    if not val then decode_error(str, pos, "invalid number") end
+    return val, pos + #numstr
+  end
+
+  local function decode_literal(str, pos)
+    local word = str:match("^%a+", pos)
+    if word == "true" then return true, pos + 4 end
+    if word == "false" then return false, pos + 5 end
+    if word == "null" then return nil, pos + 4 end
+    decode_error(str, pos, "invalid literal")
+  end
+
+  local function decode_array(str, pos)
+    pos = decode_scanwhite(str, pos + 1)
+    local arr, n = {}, 0
+    if str:sub(pos, pos) == "]" then return arr, pos + 1 end
+    while true do
+      local val
+      val, pos = decode(str, pos)
+      n = n + 1
+      arr[n] = val
+      pos = decode_scanwhite(str, pos)
+      local c = str:sub(pos, pos)
+      if c == "]" then return arr, pos + 1 end
+      if c ~= "," then decode_error(str, pos, "expected ']' or ','") end
+      pos = decode_scanwhite(str, pos + 1)
+    end
+  end
+
+  local function decode_object(str, pos)
+    pos = decode_scanwhite(str, pos + 1)
+    local obj = {}
+    if str:sub(pos, pos) == "}" then return obj, pos + 1 end
+    while true do
+      local key
+      key, pos = decode_string(str, pos)
+      pos = decode_scanwhite(str, pos)
+      if str:sub(pos, pos) ~= ":" then decode_error(str, pos, "expected ':'") end
+      pos = decode_scanwhite(str, pos + 1)
+      local val
+      val, pos = decode(str, pos)
+      obj[key] = val
+      pos = decode_scanwhite(str, pos)
+      local c = str:sub(pos, pos)
+      if c == "}" then return obj, pos + 1 end
+      if c ~= "," then decode_error(str, pos, "expected '}' or ','") end
+      pos = decode_scanwhite(str, pos + 1)
+    end
+  end
+
+  local char_func_map = { ['"'] = decode_string, ["{"] = decode_object, ["["] = decode_array }
+  setmetatable(char_func_map, { __index = function(t, c)
+    if c:match("%d") or c == "-" then return decode_number end
+    return decode_literal
+  end })
+
+  decode = function(str, pos)
+    pos = decode_scanwhite(str, pos or 1)
+    if pos > #str then decode_error(str, pos, "unexpected end of input") end
+    return char_func_map[str:sub(pos, pos)](str, pos)
+  end
+  json.decode = function(str)
+    if type(str) ~= "string" then error("JSON parse error: input is not a string", 0) end
+    local val = decode(str, 1)
+    return val
+  end
+
+  return json
+end)()
 
 -- ============================================================================
 -- COMMAND HANDLERS - PROCESS & MODULES
@@ -748,20 +977,38 @@ function cmd_read_integer(params)
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end
     
-    local val
+    local val, floatHex
     if itype == "byte" then
         local b = readBytes(addr, 1, true)
         if b and #b > 0 then val = b[1] end
     elseif itype == "word" then val = readSmallInteger(addr)
     elseif itype == "dword" then val = readInteger(addr)
     elseif itype == "qword" then val = readQword(addr)
-    elseif itype == "float" then val = readFloat(addr)
-    elseif itype == "double" then val = readDouble(addr)
+    elseif itype == "float" or itype == "double" then
+        -- One snapshot for both fields: separate readFloat + readInteger calls
+        -- could straddle a write by the target and pair a value with the bits
+        -- of a different value.
+        local n = (itype == "float") and 4 or 8
+        local b = readBytes(addr, n, true)
+        if b and #b == n then
+            local raw = string.char(table.unpack(b))
+            if n == 4 then
+                val = string.unpack("<f", raw)
+                floatHex = string.format("0x%08X", string.unpack("<I4", raw))
+            else
+                val = string.unpack("<d", raw)
+                floatHex = string.format("0x%016X", string.unpack("<i8", raw))
+            end
+        end
     else return { success = false, error = "Unknown type: " .. tostring(itype) } end
     
     if val == nil then return { success = false, error = "Failed to read at " .. toHex(addr) } end
-    
-    return { success = true, address = toHex(addr), value = val, type = itype, hex = toHex(val) }
+
+    -- For float/double, "hex" is the raw IEEE-754 bit pattern (what you would
+    -- AOB-scan for or patch), not the truncated numeric value.
+    local hex = floatHex or toHex(val)
+
+    return { success = true, address = toHex(addr), value = val, type = itype, hex = hex }
 end
 
 function cmd_read_string(params)
@@ -1445,7 +1692,8 @@ function cmd_set_breakpoint(params)
     local captureRegs = params.capture_registers ~= false
     local captureStackFlag = params.capture_stack or false
     local stackDepth = params.stack_depth or 16
-    
+    local maxHits = parseMaxHits(params.max_hits)
+
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end
 
@@ -1480,29 +1728,26 @@ function cmd_set_breakpoint(params)
     -- CRITICAL: Use bpmDebugRegister for hardware breakpoints (anti-cheat safe)
     -- Signature: debug_setBreakpoint(address, size, trigger, breakpointmethod, function)
     debug_setBreakpoint(addr, 1, bptExecute, bpmDebugRegister, function()
-        local hitData = {
-            id = bpId,
-            address = toHex(addr),
-            timestamp = os.time(),
-            breakpoint_type = "hardware_execute"
-        }
-        
-        if captureRegs then
-            hitData.registers = captureRegisters()
-        end
-        
-        if captureStackFlag then
-            hitData.stack = captureStack(stackDepth)
-        end
-        
-        table.insert(serverState.breakpoint_hits[bpId], hitData)
-        debug_continueFromBreakpoint(co_run)
-        return 1
+        return handleBreakpointHit(bpId, addr, function()
+            local hitData = {
+                id = bpId,
+                address = toHex(addr),
+                timestamp = os.time(),
+                breakpoint_type = "hardware_execute"
+            }
+            if captureRegs then
+                hitData.registers = captureRegisters()
+            end
+            if captureStackFlag then
+                hitData.stack = captureStack(stackDepth)
+            end
+            return hitData
+        end)
     end)
-    
+
     serverState.hw_bp_slots[slot] = { id = bpId, address = addr }
-    serverState.breakpoints[bpId] = { address = addr, slot = slot, type = "execute" }
-    return { success = true, id = bpId, address = toHex(addr), slot = slot, method = "hardware_debug_register" }
+    serverState.breakpoints[bpId] = { address = addr, slot = slot, type = "execute", max_hits = maxHits }
+    return { success = true, id = bpId, address = toHex(addr), slot = slot, max_hits = maxHits, method = "hardware_debug_register" }
 end
 
 function cmd_set_data_breakpoint(params)
@@ -1510,7 +1755,8 @@ function cmd_set_data_breakpoint(params)
     local bpId = params.id
     local accessType = params.access_type or "w"  -- r, w, rw
     local size = params.size or 4
-    
+    local maxHits = parseMaxHits(params.max_hits)
+
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end
 
@@ -1546,29 +1792,27 @@ function cmd_set_data_breakpoint(params)
     -- CRITICAL: Use bpmDebugRegister for hardware breakpoints (anti-cheat safe)
     -- Signature: debug_setBreakpoint(address, size, trigger, breakpointmethod, function)
     debug_setBreakpoint(addr, size, bpType, bpmDebugRegister, function()
-        local arch = getArchInfo()
-        local instPtr = arch.instPtr
-        local hitData = {
-            id = bpId,
-            type = "data_" .. accessType,
-            address = toHex(addr),
-            timestamp = os.time(),
-            breakpoint_type = "hardware_data",
-            value = arch.is64bit and readQword(addr) or readInteger(addr),
-            registers = captureRegisters(),
-            instruction = instPtr and disassemble(instPtr) or "???",
-            arch = arch.is64bit and "x64" or "x86"
-        }
-        
-        table.insert(serverState.breakpoint_hits[bpId], hitData)
-        debug_continueFromBreakpoint(co_run)
-        return 1
+        return handleBreakpointHit(bpId, addr, function()
+            local arch = getArchInfo()
+            local instPtr = arch.instPtr
+            return {
+                id = bpId,
+                type = "data_" .. accessType,
+                address = toHex(addr),
+                timestamp = os.time(),
+                breakpoint_type = "hardware_data",
+                value = arch.is64bit and readQword(addr) or readInteger(addr),
+                registers = captureRegisters(),
+                instruction = instPtr and disassemble(instPtr) or "???",
+                arch = arch.is64bit and "x64" or "x86"
+            }
+        end)
     end)
-    
+
     serverState.hw_bp_slots[slot] = { id = bpId, address = addr }
-    serverState.breakpoints[bpId] = { address = addr, slot = slot, type = "data" }
-    
-    return { success = true, id = bpId, address = toHex(addr), slot = slot, access_type = accessType, method = "hardware_debug_register" }
+    serverState.breakpoints[bpId] = { address = addr, slot = slot, type = "data", max_hits = maxHits }
+
+    return { success = true, id = bpId, address = toHex(addr), slot = slot, access_type = accessType, max_hits = maxHits, method = "hardware_debug_register" }
 end
 
 function cmd_remove_breakpoint(params)
@@ -1608,18 +1852,31 @@ function cmd_get_breakpoint_hits(params)
     end
 
     local limit, offset, page, total = paginate(params, hits, 100)
-    return { success = true, total = total, offset = offset, limit = limit, returned = #page, hits = page }
+    local result = { success = true, total = total, offset = offset, limit = limit, returned = #page, hits = page }
+    if bpId then
+        local bp = serverState.breakpoints[bpId]
+        if bp then
+            for k, v in pairs(breakpointStats(bp)) do result[k] = v end
+        end
+    else
+        local stats = {}
+        for id, bp in pairs(serverState.breakpoints) do stats[tostring(id)] = breakpointStats(bp) end
+        if next(stats) then result.stats = stats end
+    end
+    return result
 end
 
 function cmd_list_breakpoints(params)
     local list = {}
     for id, bp in pairs(serverState.breakpoints) do
-        table.insert(list, {
+        local entry = {
             id = id,
             address = toHex(bp.address),
             type = bp.type or "execution",
             slot = bp.slot
-        })
+        }
+        for k, v in pairs(breakpointStats(bp)) do entry[k] = v end
+        table.insert(list, entry)
     end
     return { success = true, count = #list, breakpoints = list }
 end
@@ -1640,17 +1897,50 @@ end
 -- COMMAND HANDLERS - LUA EVALUATION
 -- ============================================================================
 
+-- Convert an arbitrary Lua value into plain JSON-encodable data. Tables are
+-- copied with bounded depth/size and cycle detection; functions, userdata
+-- and CE objects become their tostring().
+local function toPlainData(v, depth, seen)
+    local t = type(v)
+    if t == "nil" or t == "boolean" or t == "number" or t == "string" then return v end
+    if t ~= "table" then return tostring(v) end
+    depth = depth or 0
+    seen = seen or {}
+    if seen[v] then return "<cycle: " .. tostring(v) .. ">" end
+    if depth >= 8 then return tostring(v) end
+    seen[v] = true
+    local out, n = {}, 0
+    for k, val in pairs(v) do
+        n = n + 1
+        if n > 10000 then out["__truncated"] = true; break end
+        local key = (type(k) == "number" or type(k) == "string") and k or tostring(k)
+        out[key] = toPlainData(val, depth + 1, seen)
+    end
+    seen[v] = nil
+    return out
+end
+
 function cmd_evaluate_lua(params)
     local code = params.code
     if not code then return { success = false, error = "No code provided" } end
-    
+
     local fn, err = load(code, "mcp_evaluate_lua", "t")
     if not fn then return { success = false, error = "Compile error: " .. tostring(err) } end
-    
-    local ok, result = pcall(fn)
-    if not ok then return { success = false, error = "Runtime error: " .. tostring(result) } end
-    
-    return { success = true, result = tostring(result) }
+
+    local packed = table.pack(pcall(fn))
+    if not packed[1] then return { success = false, error = "Runtime error: " .. tostring(packed[2]) } end
+
+    -- result: tostring() of the first return value (backward compatible).
+    -- results: every return value as structured JSON (tables included).
+    -- nil return values become json.null so trailing nils keep their slot
+    -- (`return 42, nil` -> [42, null], matching result_count).
+    local results = {}
+    for i = 2, packed.n do
+        local v = toPlainData(packed[i])
+        if v == nil then v = json.null end
+        results[i - 1] = v
+    end
+    return { success = true, result = tostring(packed[2]), results = results, result_count = packed.n - 1 }
 end
 
 -- >>> BEGIN UNIT-22 Threading Sync <<<
@@ -4792,6 +5082,7 @@ function cmd_debug_set_breakpoint_for_thread(params)
     local addr     = params.address
     local size     = params.size    or 1
     local trigger  = params.trigger or "execute"
+    local maxHits  = parseMaxHits(params.max_hits)
 
     if not threadId then return { success = false, error = "thread_id is required", error_code = "INVALID_PARAMS" } end
 
@@ -4814,15 +5105,15 @@ function cmd_debug_set_breakpoint_for_thread(params)
     serverState.breakpoint_hits[bpHandle] = {}
 
     local setOk, setErr = pcall(debug_setBreakpointForThread, threadId, addr, size, bpTrigger, bpmDebugRegister, function()
-        table.insert(serverState.breakpoint_hits[bpHandle], {
-            handle    = bpHandle,
-            thread_id = threadId,
-            address   = toHex(addr),
-            timestamp = os.time(),
-            registers = captureRegisters(),
-        })
-        debug_continueFromBreakpoint(co_run)
-        return 1
+        return handleBreakpointHit(bpHandle, addr, function()
+            return {
+                handle    = bpHandle,
+                thread_id = threadId,
+                address   = toHex(addr),
+                timestamp = os.time(),
+                registers = captureRegisters(),
+            }
+        end)
     end)
 
     if not setOk then
@@ -4830,7 +5121,7 @@ function cmd_debug_set_breakpoint_for_thread(params)
         return { success = false, error = "debug_setBreakpointForThread failed: " .. tostring(setErr), error_code = "CE_API_ERROR" }
     end
 
-    serverState.breakpoints[bpHandle] = { address = addr, type = "thread_bp", thread_id = threadId }
+    serverState.breakpoints[bpHandle] = { address = addr, type = "thread_bp", thread_id = threadId, max_hits = maxHits }
 
     return {
         success   = true,
@@ -4839,6 +5130,7 @@ function cmd_debug_set_breakpoint_for_thread(params)
         address   = toHex(addr),
         trigger   = trigger,
         size      = size,
+        max_hits  = maxHits,
     }
 end
 
@@ -5948,27 +6240,46 @@ local commandHandlers = {
 -- MAIN COMMAND PROCESSOR
 -- ============================================================================
 
+-- Frames larger than this are rejected in both directions (matches
+-- MAX_RESPONSE_SIZE_BYTES in mcp_cheatengine.py and the TCP relay).
+local MAX_FRAME_BYTES = 32 * 1024 * 1024
+
+-- JSON-RPC error codes used by the bridge. -32001 is server-defined and
+-- maps to error_code OUT_OF_RESOURCES on the Python side.
+local function rpcError(code, message, id)
+    return json.encode({ jsonrpc = "2.0", error = { code = code, message = message }, id = id })
+end
+
 local function executeCommand(jsonRequest)
     local ok, request = pcall(json.decode, jsonRequest)
-    if not ok or not request then
-        return json.encode({ jsonrpc = "2.0", error = { code = -32700, message = "Parse error" }, id = nil })
+    if not ok or type(request) ~= "table" then
+        return rpcError(-32700, "Parse error: " .. (ok and "request is not a JSON object" or tostring(request)))
     end
-    
+
     local method = request.method
     local params = request.params or {}
     local id = request.id
-    
+
     local handler = commandHandlers[method]
     if not handler then
-        return json.encode({ jsonrpc = "2.0", error = { code = -32601, message = "Method not found: " .. tostring(method) }, id = id })
+        return rpcError(-32601, "Method not found: " .. tostring(method), id)
     end
-    
+
     local ok2, result = pcall(handler, params)
     if not ok2 then
-        return json.encode({ jsonrpc = "2.0", error = { code = -32603, message = "Internal error: " .. tostring(result) }, id = id })
+        return rpcError(-32603, "Internal error: " .. tostring(result), id)
     end
-    
-    return json.encode({ jsonrpc = "2.0", result = result, id = id })
+
+    local ok3, encoded = pcall(json.encode, { jsonrpc = "2.0", result = result, id = id })
+    if not ok3 then
+        return rpcError(-32603, "Internal error: could not encode result of " .. tostring(method) .. ": " .. tostring(encoded), id)
+    end
+    if #encoded >= MAX_FRAME_BYTES then
+        return rpcError(-32001, string.format(
+            "Response too large (%d bytes, max %d). Request less data (offset/limit/size/max_results).",
+            #encoded, MAX_FRAME_BYTES - 1), id)
+    end
+    return encoded
 end
 
 -- ============================================================================
@@ -5976,6 +6287,45 @@ end
 -- ============================================================================
 -- Replaces v10 Timer architecture to prevent GUI Freezes.
 -- I/O happens in Worker Thread. Execution happens in Main Thread.
+
+-- Write one length-prefixed frame (4-byte little-endian length + body).
+-- Returns false if the pipe rejected the write (client gone).
+local function writeFrame(pipe, payload)
+    local n = #payload
+    local header = { n % 256, math.floor(n / 256) % 256, math.floor(n / 65536) % 256, math.floor(n / 16777216) % 256 }
+    if not pipe.writeBytes(header) then return false end
+    if n > 0 and not pipe.writeString(payload) then return false end
+    return true
+end
+
+-- Serve one request on a connected pipe (worker thread). Returns true to keep
+-- the connection, false to drop it. Every request that is read gets exactly
+-- one response frame unless the pipe itself is broken: the client must never
+-- be left waiting for a reply that will not come.
+local function serveOneRequest(thread, pipe)
+    local lenBytes = pipe.readBytes(4)
+    if not lenBytes or #lenBytes ~= 4 then return false end   -- disconnected or broken
+
+    local len = lenBytes[1] + (lenBytes[2] * 256) + (lenBytes[3] * 65536) + (lenBytes[4] * 16777216)
+    if len == 0 or len >= MAX_FRAME_BYTES then
+        -- The body was not consumed, so the stream cannot be resynchronised:
+        -- report the problem, then drop the connection.
+        writeFrame(pipe, rpcError(-32600, string.format("Invalid request frame length %d (max %d)", len, MAX_FRAME_BYTES - 1)))
+        return false
+    end
+
+    local payload = pipe.readString(len)
+    if not payload or #payload ~= len then return false end    -- short read: stream is broken
+
+    -- CRITICAL: execute on the main thread; all CE API calls must run there.
+    local response
+    thread.synchronize(function()
+        response = executeCommand(payload)
+    end)
+    if not response then response = rpcError(-32603, "Internal error: no response produced") end
+
+    return writeFrame(pipe, response)
+end
 
 local function PipeWorker(thread)
     log("Worker Thread Started - Waiting for connection...")
@@ -6011,46 +6361,15 @@ local function PipeWorker(thread)
             serverState.connected = true
             
             while not thread.Terminated and pipe.Connected do
-                -- Try to read header (4 bytes)
-                -- We use pcall to handle timeouts/errors gracefully
-                local ok, lenBytes = pcall(function() return pipe.readBytes(4) end)
-                
-                if ok and lenBytes and #lenBytes == 4 then
-                    local len = lenBytes[1] + (lenBytes[2] * 256) + (lenBytes[3] * 65536) + (lenBytes[4] * 16777216)
-                    
-                    -- Sanity check length
-                    if len > 0 and len < 32 * 1024 * 1024 then
-                        local payload = pipe.readString(len)
-                        
-                        if payload then
-                            -- CRITICAL: EXECUTE ON MAIN THREAD
-                            -- We pause the worker and run logic on GUI thread to be safe
-                            local response = nil
-                            thread.synchronize(function()
-                                response = executeCommand(payload)
-                            end)
-                            
-                            -- Write response back (Worker Thread)
-                            if response then
-                                local rLen = #response
-                                local b1 = rLen % 256
-                                local b2 = math.floor(rLen / 256) % 256
-                                local b3 = math.floor(rLen / 65536) % 256
-                                local b4 = math.floor(rLen / 16777216) % 256
-                                
-                                pipe.writeBytes({b1, b2, b3, b4})
-                                pipe.writeString(response)
-                            end
-                        else
-                             -- log("Thread: Read payload failed (nil)")
-                        end
-                    end
-                else
-                    -- Read failed. If pipe disconnected, the loop will terminate on next check.
-                    if not pipe.Connected then
-                        -- Client disconnected gracefully
-                    end
+                -- pcall so an unexpected error drops this connection instead
+                -- of killing the worker thread (which would leave the bridge
+                -- dead until the script is reloaded).
+                local ok, keep = pcall(serveOneRequest, thread, pipe)
+                if not ok then
+                    log("Request loop error (dropping connection): " .. tostring(keep))
+                    break
                 end
+                if not keep then break end
             end
             
             serverState.connected = false

@@ -276,8 +276,8 @@
 **Returns:** JSON with:
 - `success` (bool)
 - `address` (str)
-- `value` (int|float): Numeric value.
-- `hex` (str): Hex representation.
+- `value` (int|float): Numeric value. Integers (including full 64-bit qwords) are exact; qwords are signed, so use `hex` for pointers above 2^63.
+- `hex` (str): Hex representation. For `float`/`double` this is the raw IEEE-754 bit pattern, decoded from the same single read as `value` (e.g. `87.5` → `"0x42AF0000"`), which is what you would AOB-scan for or patch.
 
 **Example request:**
 ```json
@@ -287,6 +287,10 @@
 **Example response:**
 ```json
 {"success": true, "address": "0x00400000", "value": 905969664, "hex": "0x36005A4D"}
+```
+
+```json
+{"success": true, "address": "0x1A2B3C40", "type": "float", "value": 87.5, "hex": "0x42AF0000"}
 ```
 
 ---
@@ -861,13 +865,17 @@ rejected with `INVALID_PARAMS` rather than silently scanning for nothing.
 - `id` (str, default=address): Unique identifier for this breakpoint.
 - `capture_registers` (bool, default=true): Capture CPU registers on hit.
 - `capture_stack` (bool, default=false): Capture stack values.
-- `stack_depth` (int, default=16): Number of stack entries to capture.
+- `stack_depth` (int, default=16): Number of stack entries to capture. In each hit, `stack[0]` is `[SP+0]` (the return address on a function-entry breakpoint) and `stack[n]` is `[SP+n*ptrSize]`; unreadable slots are `null`.
+- `max_hits` (int, default=1000, range 1-100000): Size of the hit ring buffer. Only the newest hits are kept; see `hit_count` / `dropped_hits` in `get_breakpoint_hits`.
+
+Capture errors inside the hit callback never leave the target suspended: the thread is always resumed and the hit is logged with an `error` field.
 
 **Returns:** JSON with:
 - `success` (bool)
 - `id` (str)
 - `address` (str)
-- `slot` (int): Hardware debug register slot (0-3).
+- `slot` (int): Hardware debug register slot (1-4).
+- `max_hits` (int)
 - `method` (str): Always `"hardware_debug_register"`.
 
 **Example request:**
@@ -891,6 +899,7 @@ rejected with `INVALID_PARAMS` rather than silently scanning for nothing.
 - `id` (str, default=address): Unique identifier.
 - `access_type` (str, default=`"w"`): `"r"` (read), `"w"` (write), `"rw"` (both).
 - `size` (int, default=4): Bytes to monitor (1, 2, or 4).
+- `max_hits` (int, default=1000, range 1-100000): Size of the hit ring buffer (newest hits kept).
 
 **Returns:** JSON with:
 - `success` (bool)
@@ -898,6 +907,7 @@ rejected with `INVALID_PARAMS` rather than silently scanning for nothing.
 - `address` (str)
 - `slot` (int)
 - `access_type` (str)
+- `max_hits` (int)
 - `method` (str)
 
 **Example request:**
@@ -919,11 +929,14 @@ rejected with `INVALID_PARAMS` rather than silently scanning for nothing.
 **Parameters:**
 - `id` (str, optional): Specific breakpoint ID; omit for all breakpoints.
 - `clear` (bool, default=false): Clear hit log after retrieval.
+- `offset` / `limit` (int): Pagination (default 0 / 100).
 
 **Returns:** JSON with:
 - `success` (bool)
-- `count` (int)
-- `hits` (array): List of `{id, address, timestamp, breakpoint_type, registers?, stack?}`.
+- `total`, `offset`, `limit`, `returned` (int): Standard pagination fields.
+- `hits` (array): List of `{id, address, timestamp, breakpoint_type, hit_number, registers?, stack?, error?}`, oldest first.
+- With `id`: `hit_count` (lifetime hits), `dropped_hits` (evicted by the ring buffer), `max_hits`.
+- Without `id`: `stats` map of `id -> {hit_count, dropped_hits, max_hits}`.
 
 **Example request:**
 ```json
@@ -932,7 +945,7 @@ rejected with `INVALID_PARAMS` rather than silently scanning for nothing.
 
 **Example response:**
 ```json
-{"success": true, "count": 1, "hits": [{"id": "bp_main", "address": "0x00401000", "timestamp": 1733540000, "breakpoint_type": "hardware_execute", "registers": {"EAX": "0x00000001", "EBX": "0x00000000"}}]}
+{"success": true, "total": 1, "offset": 0, "limit": 100, "returned": 1, "hit_count": 1, "dropped_hits": 0, "max_hits": 1000, "hits": [{"id": "bp_main", "address": "0x00401000", "timestamp": 1733540000, "breakpoint_type": "hardware_execute", "hit_number": 1, "registers": {"EAX": "0x00000001", "EBX": "0x00000000"}}]}
 ```
 
 ---
@@ -969,7 +982,7 @@ rejected with `INVALID_PARAMS` rather than silently scanning for nothing.
 **Returns:** JSON with:
 - `success` (bool)
 - `count` (int)
-- `breakpoints` (array): List of `{id, address, type, slot}`.
+- `breakpoints` (array): List of `{id, address, type, slot, hit_count, dropped_hits, max_hits}`.
 
 **Example request:**
 ```json
@@ -1071,16 +1084,18 @@ rejected with `INVALID_PARAMS` rather than silently scanning for nothing.
 
 **Returns:** JSON with:
 - `success` (bool)
-- `result` (str): Return value as string.
+- `result` (str): `tostring()` of the first return value (kept for backward compatibility).
+- `results` (array): Every return value as structured JSON, one slot per value (`nil` → `null`, so `return 42, nil` gives `[42, null]`). Tables are converted recursively (max depth 8, max 10000 keys per table, cycles become `"<cycle: ...>"`); functions/userdata become their `tostring()`.
+- `result_count` (int): Number of return values.
 
 **Example request:**
 ```json
-{"method": "evaluate_lua", "params": {"code": "return 1 + 1"}}
+{"method": "evaluate_lua", "params": {"code": "return 1 + 1, {a = 1, list = {1, 2}}"}}
 ```
 
 **Example response:**
 ```json
-{"success": true, "result": "2"}
+{"success": true, "result": "2", "results": [2, {"a": 1, "list": [1, 2]}], "result_count": 2}
 ```
 
 > **Caution**: Use responsibly. Avoid infinite loops or memory-intensive operations.
@@ -1747,13 +1762,15 @@ rejected with `INVALID_PARAMS` rather than silently scanning for nothing.
 **Parameters:**
 - `address` (str, required): Code address.
 - `thread_id` (int, required): Thread ID to restrict to.
-- `id` (str, optional): Breakpoint identifier.
+- `size` (int, default=1), `trigger` (str, default=`"execute"`): `execute` | `write` | `read` | `access`.
+- `max_hits` (int, default=1000): Size of the hit ring buffer (newest hits kept).
 
 **Returns:** JSON with:
 - `success` (bool)
-- `id` (str)
+- `bp_handle` (str): Use as the `id` for `get_breakpoint_hits`.
 - `address` (str)
 - `thread_id` (int)
+- `trigger`, `size`, `max_hits`
 
 ---
 

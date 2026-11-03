@@ -18,7 +18,7 @@ python MCP_Server/test_mcp.py
 
 Loading the Lua side in Cheat Engine: `File -> Execute Script -> open MCP_Server/ce_mcp_bridge.lua -> Execute`. Some CE builds expose this through `Table -> Show Cheat Table Lua Script`; in that case execute `dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])` instead of pasting the full bridge. Success log: `[MCP v12.0.0] MCP Server Listening on: CE_MCP_Bridge_v99`. Re-executing the script auto-calls `StopMCPBridge` / `cleanupZombieState` first, so reloading is safe.
 
-There is **no build step, no linter, and no unit-test harness**. `test_mcp.py` is a single end-to-end script that talks to the live Named Pipe; running a "single test" means editing the `all_tests` dict in `test_mcp.py:main` or commenting out sections.
+There is **no build step and no linter**. Pure-Lua pieces have offline tests that need no CE: `lua MCP_Server/test_json_codec.lua` (wire codec) and `lua MCP_Server/test_pointer_parse.lua` (Lua 5.3/5.4). Otherwise `test_mcp.py` is a single end-to-end script that talks to the live Named Pipe; running a "single test" means editing the `all_tests` dict in `test_mcp.py:main` or commenting out sections.
 
 The MCP server is normally spawned by the AI client over stdio, but can be launched directly with `python MCP_Server/mcp_cheatengine.py` for debugging (it blocks waiting for stdio JSON-RPC).
 
@@ -41,7 +41,7 @@ AI client ──(MCP / JSON-RPC over stdio)──▶ mcp_cheatengine.py
 
 ### Python side — `MCP_Server/mcp_cheatengine.py`
 
-Thin `FastMCP` wrapper. Every `@mcp.tool()` is a one-liner that calls `ce_client.send_command("<method>", {...})` and formats the result. `CEBridgeClient.send_command` writes a 4-byte little-endian length prefix + UTF-8 JSON-RPC body to the Named Pipe, reads the same framing back, caps responses at 16 MB, and auto-reconnects once on pipe failure.
+Thin `FastMCP` wrapper. Every `@mcp.tool()` is a one-liner that calls `ce_client.send_command("<method>", {...})` and formats the result. `CEBridgeClient.send_command` writes a 4-byte little-endian length prefix + UTF-8 JSON-RPC body to the Named Pipe, reads the same framing back, caps frames at 32 MB (same limit in the Lua bridge and `ce_tcp_relay.py`), and reconnects automatically. **Retry rule:** a request is resent only if it provably never reached CE (connect failure, stale connection, failed write). Once it is on the wire, a lost connection or a `CE_MCP_TIMEOUT` is reported and *not* retried, because commands like `auto_assemble`, `allocate_memory` and `write_memory` are not idempotent. After a timeout the command keeps running in CE and the single-instance pipe stays busy until it finishes; the client waits up to 5 s for a busy pipe and then reports it as busy. JSON-RPC errors come back as `{success: false, error, error_code, jsonrpc_code}`.
 
 **Windows stdio pitfalls (top of file, before any other imports)** — do not move this block:
 - The MCP SDK's `stdio_server` wraps stdio with `TextIOWrapper` without `newline='\n'`, so on Windows it emits `\r\n` and the transport rejects with "invalid trailing data." The file monkey-patches `mcp.server.stdio.stdio_server` **and** `mcp.server.fastmcp.server.stdio_server` (FastMCP captures a reference at import time, so patching only the first module is a silent no-op).
@@ -72,7 +72,7 @@ Two files are the source of truth — there's no codegen, so you must edit both:
 - **Pipe name** `\\.\pipe\CE_MCP_Bridge_v99` is hardcoded in both `mcp_cheatengine.py` (as `PIPE_NAME`) and `ce_mcp_bridge.lua` (as `PIPE_NAME`). Keep them in sync if you ever rename it. The `_v99` suffix is the wire-protocol version and is independent of the bridge version (`12.0.0`).
 - **Codex config:** use TOML, not JSON. Add `[mcp_servers.cheatengine]`, `command = "python"`, and `args = ['C:\path\to\MCP_Server\mcp_cheatengine.py']`. Use TOML single-quoted strings for Windows paths so backslashes are literal, then restart Codex and verify with the `ping` tool.
 - **Anti-cheat safety** (per `AI_Context/AI_Guide_MCP_Server_Implementation.md`): prefer hardware DR0–DR3 breakpoints over software (`0xCC`) breakpoints, and prefer DBVM watches for truly invisible tracing. The existing `cmd_set_breakpoint` already uses `debug_setBreakpoint` (hardware); keep new debugging tools on that path.
-- **Env vars:** `CE_MCP_TIMEOUT` (default 30s) limits per-tool latency; `CE_MCP_ALLOW_SHELL=1` enables `run_command` / `shell_execute` (default: disabled).
+- **Env vars:** `CE_MCP_TIMEOUT` (default 30s; `<=0` disables) limits per-tool latency, and timed-out commands are never retried; `CE_MCP_ALLOW_SHELL=1` enables `run_command` / `shell_execute` (default: disabled).
 
 ## Conventions (v12 overhaul)
 
