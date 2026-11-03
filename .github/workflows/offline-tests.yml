@@ -1,0 +1,59 @@
+name: Offline tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lua 5.3 / 5.4
+        run: sudo apt-get update && sudo apt-get install -y lua5.3 lua5.4
+
+      - name: Lua unit tests and bridge syntax check (system Lua)
+        run: |
+          for lua in lua5.3 lua5.4; do
+            $lua MCP_Server/test_json_codec.lua
+            $lua MCP_Server/test_pointer_parse.lua
+          done
+          luac5.3 -p MCP_Server/ce_mcp_bridge.lua
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install dependencies
+        run: python -m pip install -r MCP_Server/requirements-dev.txt
+
+      - name: Byte-compile Python
+        run: python -m compileall -q MCP_Server
+
+      - name: Offline test suite
+        run: python -m pytest -v
+
+  windows:
+    name: Windows (named pipe + stdio)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -r MCP_Server/requirements.txt -r MCP_Server/requirements-dev.txt
+
+      - name: Offline test suite (includes real named-pipe tests)
+        run: python -m pytest -v -rs
