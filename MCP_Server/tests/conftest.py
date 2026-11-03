@@ -31,7 +31,8 @@ class Bridge:
         lupa = pytest.importorskip("lupa")
         self.L = lupa.lua53.LuaRuntime(encoding=None)
         self.L.execute((HERE / "ce_stub.lua").read_bytes())
-        src = BRIDGE_LUA.read_bytes()
+        # Windows checkouts may have CRLF line endings (core.autocrlf).
+        src = BRIDGE_LUA.read_bytes().replace(b"\r\n", b"\n")
         hook = b"\n-- Auto-start\nStartMCPBridge()"
         assert hook in src, "auto-start marker moved; update conftest.Bridge"
         src = src.replace(hook, b"\n_TEST = { json = json, exec = executeCommand, serve = serveOneRequest }\n")

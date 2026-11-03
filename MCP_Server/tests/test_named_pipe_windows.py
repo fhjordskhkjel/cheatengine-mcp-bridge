@@ -78,6 +78,10 @@ class PipeServer:
                                        "id": req["id"]}).encode()
                     win32file.WriteFile(h, struct.pack("<I", len(body)) + body)
                     if self.drop_after_reply:
+                        # DisconnectNamedPipe discards unread data, so wait until
+                        # the client has read the reply. This models a reload
+                        # *between* calls, which is when the real bridge drops.
+                        win32file.FlushFileBuffers(h)
                         break
             except pywintypes.error:
                 pass  # client went away

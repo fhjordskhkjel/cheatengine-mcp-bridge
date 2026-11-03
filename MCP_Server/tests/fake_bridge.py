@@ -56,7 +56,10 @@ class FakeBridge:
     def _serve(self, conn):
         with conn:
             while True:
-                header = _recv_exact(conn, 4)
+                try:
+                    header = _recv_exact(conn, 4)
+                except OSError:  # client reset the connection (e.g. killed server process)
+                    return
                 if header is None:
                     return
                 req = json.loads(_recv_exact(conn, struct.unpack("<I", header)[0]).decode("utf-8"))
