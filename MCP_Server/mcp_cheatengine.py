@@ -14,9 +14,14 @@ if sys.platform == "win32":
     from io import TextIOWrapper
     from contextlib import asynccontextmanager
     
-    # Set binary mode on underlying file handles
-    msvcrt.setmode(sys.stdin.fileno(), os.O_BINARY)
-    msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
+    # Set binary mode on underlying file handles. Skip streams without a real
+    # descriptor (e.g. pytest's capture objects when this module is imported
+    # as a library); the stdio server only ever runs on real handles.
+    for _stream in (sys.stdin, sys.stdout):
+        try:
+            msvcrt.setmode(_stream.fileno(), os.O_BINARY)
+        except (AttributeError, OSError, ValueError):  # io.UnsupportedOperation is OSError+ValueError
+            pass
     
     # Monkey-patch the MCP SDK's stdio_server to use newline='\n'
     import mcp.server.stdio as mcp_stdio
