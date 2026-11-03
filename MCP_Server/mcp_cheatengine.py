@@ -86,7 +86,9 @@ _mcp_stdout = sys.stdout
 sys.stdout = sys.stderr
 
 # Now safe to import libraries that might print during import
+import itertools
 import json
+import select
 import socket
 import struct
 import time
@@ -113,6 +115,11 @@ try:
 except ImportError:
     win32file = None
     pywintypes = None
+
+try:
+    import win32pipe
+except ImportError:
+    win32pipe = None
 
 # Restore stdout for MCP usage after imports are complete
 sys.stdout = _mcp_stdout
@@ -197,156 +204,345 @@ CE_MCP_PORT = _parse_tcp_port(os.environ.get("CE_MCP_PORT"))
 # BRIDGE CLIENTS
 # ============================================================================
 
+class BridgeError(ConnectionError):
+    """Base class for bridge transport/protocol failures."""
+
+
+class RequestNotSentError(BridgeError):
+    """The request never reached Cheat Engine, so resending it is safe."""
+
+
+class ProtocolError(BridgeError):
+    """The response frame was malformed; the stream state is unknown."""
+
+
+# JSON-RPC error code -> v12 error_code (see CLAUDE.md "Return shape").
+_JSONRPC_ERROR_CODES = {
+    -32700: "INVALID_PARAMS",    # parse error
+    -32600: "INVALID_PARAMS",    # invalid request / frame
+    -32601: "NOT_FOUND",         # method not found
+    -32602: "INVALID_PARAMS",
+    -32603: "INTERNAL_ERROR",
+    -32001: "OUT_OF_RESOURCES",  # response too large
+}
+
+
 class CEBridgeClient:
+    """Length-prefixed JSON-RPC client.
+
+    Retry rule: a request is resent only when it provably never reached CE
+    (connect failure, stale connection detected before sending, or a failed
+    write). Once the request is on the wire, a failure or timeout is reported
+    and NOT retried, because commands like auto_assemble, allocate_memory or
+    write_memory are not idempotent and may already have run.
+
+    Timeout rule: the exchange runs on a helper thread. On timeout the
+    connection is detached (not closed under the blocked thread); the helper
+    closes it once CE finally answers, so nothing is closed while another
+    thread is blocked on it and a late response cannot reach a later request.
+    """
+
     def __init__(self):
         self.timeout_seconds = CE_MCP_TIMEOUT_SECONDS
+        self._conn = None
+        self._ids = itertools.count(1)
+        self._lock = threading.Lock()
+        self.last_connect_error = None
 
-    @property
-    def connected(self):
+    # -- transport hooks -------------------------------------------------
+    def _open(self):
+        """Open and return a new connection object, or raise."""
         raise NotImplementedError
 
-    def connect(self):
+    def _close_conn(self, conn):
         raise NotImplementedError
 
-    def _exchange_once(self, req_json):
+    def _write(self, conn, data):
         raise NotImplementedError
+
+    def _read_exact(self, conn, size):
+        raise NotImplementedError
+
+    def _is_stale(self, conn):
+        """True if the connection is known to be dead before sending."""
+        return False
 
     def _endpoint_description(self):
         return "Cheat Engine Bridge"
 
-    def _communication_error(self, error):
-        return error
+    def _unreachable_message(self):
+        return f"{self._endpoint_description()} is not reachable."
 
+    # -- connection management ------------------------------------------
+    @property
+    def connected(self):
+        return self._conn is not None
+
+    def connect(self):
+        self.last_connect_error = None
+        try:
+            self._conn = self._open()
+            return True
+        except Exception as exc:
+            self.last_connect_error = exc
+            self._conn = None
+            return False
+
+    def close(self):
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                self._close_conn(conn)
+            except Exception:
+                pass
+
+    # -- framing ---------------------------------------------------------
     def _decode_response(self, resp_header_buffer, resp_body_buffer):
-        resp_len = struct.unpack('<I', resp_header_buffer)[0]
-        if resp_len > MAX_RESPONSE_SIZE_BYTES:
-            raise ConnectionError(f"Response too large: {resp_len} bytes")
         # The Lua encoder escapes non-UTF-8 bytes, but decode leniently anyway:
         # one bad byte must never cost the whole response.
         try:
             return json.loads(resp_body_buffer.decode('utf-8', errors='replace'))
         except ValueError as exc:
-            raise ConnectionError("Invalid JSON received from CE") from exc
+            raise ProtocolError("Invalid JSON received from CE") from exc
+
+    def _exchange_once(self, conn, req_json):
+        """Send one framed request and read one framed response."""
+        header = struct.pack('<I', len(req_json))
+        try:
+            self._write(conn, header + req_json)
+        except Exception as exc:
+            raise RequestNotSentError(f"write failed: {exc}") from exc
+
+        resp_header_buffer = self._read_exact(conn, 4)
+        resp_len = struct.unpack('<I', resp_header_buffer)[0]
+        if resp_len > MAX_RESPONSE_SIZE_BYTES:
+            raise ProtocolError(f"Response too large: {resp_len} bytes")
+        resp_body_buffer = self._read_exact(conn, resp_len)
+        return self._decode_response(resp_header_buffer, resp_body_buffer)
 
     def _exchange_with_timeout(self, req_json, method):
-        """Run exchange with optional CE_MCP_TIMEOUT enforcement."""
+        """Run one exchange, enforcing CE_MCP_TIMEOUT."""
+        conn = self._conn
         timeout = self.timeout_seconds
         if timeout is None:
-            return self._exchange_once(req_json)
+            return self._exchange_once(conn, req_json)
 
-        result_holder = {}
-        error_holder = {}
+        state = {"finished": False, "abandoned": False}
+        state_lock = threading.Lock()
 
         def _worker():
             try:
-                result_holder["response"] = self._exchange_once(req_json)
-            except Exception as exc:
-                error_holder["error"] = exc
+                state["response"] = self._exchange_once(conn, req_json)
+            except BaseException as exc:
+                state["error"] = exc
+            finally:
+                with state_lock:
+                    state["finished"] = True
+                    abandoned = state["abandoned"]
+                if abandoned:
+                    try:
+                        self._close_conn(conn)
+                    except Exception:
+                        pass
 
-        worker = threading.Thread(target=_worker, daemon=True)
+        worker = threading.Thread(target=_worker, name=f"ce-mcp-{method}", daemon=True)
         worker.start()
         worker.join(timeout)
 
-        if worker.is_alive():
-            self.close()
+        with state_lock:
+            if not state["finished"]:
+                state["abandoned"] = True
+        if state["abandoned"]:
+            # Hand the connection to the worker; it closes it when CE answers.
+            if self._conn is conn:
+                self._conn = None
             raise TimeoutError(
-                f"Command '{method}' timed out after {timeout:g}s (CE_MCP_TIMEOUT)."
+                f"Command '{method}' timed out after {timeout:g}s (CE_MCP_TIMEOUT). "
+                "It was sent and may still be running inside Cheat Engine; it was not "
+                "retried. The bridge stays busy until it finishes."
             )
 
-        if "error" in error_holder:
-            raise error_holder["error"]
+        if "error" in state:
+            raise state["error"]
+        return state["response"]
 
-        return result_holder["response"]
-
+    # -- public API ------------------------------------------------------
     def send_command(self, method, params=None):
-        """Send command to CE Bridge with auto-reconnection on failure."""
-        max_retries = 2
+        """Send one command to the CE bridge.
+
+        Raises ConnectionError / TimeoutError on transport failure; JSON-RPC
+        errors come back as {"success": False, "error", "error_code"}.
+        """
+        with self._lock:
+            return self._send_command_locked(method, params)
+
+    def _send_command_locked(self, method, params):
+        request_id = next(self._ids)
+        request = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params or {},
+            "id": request_id,
+        }
+        # ensure_ascii=False: send raw UTF-8 rather than \uXXXX escapes.
+        # errors='replace' guards against lone surrogates in tool input.
+        req_json = json.dumps(request, ensure_ascii=False).encode('utf-8', errors='replace')
+
         last_error = None
-        
-        for attempt in range(max_retries):
-            if not self.connected:
-                if not self.connect():
-                    raise ConnectionError(f"{self._endpoint_description()} is not reachable.")
-
-            request = {
-                "jsonrpc": "2.0",
-                "method": method,
-                "params": params or {},
-                "id": int(time.time() * 1000)
-            }
-            
-            try:
-                # ensure_ascii=False: send raw UTF-8 rather than \uXXXX escapes.
-                # errors='replace' guards against lone surrogates in tool input.
-                req_json = json.dumps(request, ensure_ascii=False).encode('utf-8', errors='replace')
-                response = self._exchange_with_timeout(req_json, method)
-                
-                if 'error' in response:
-                    return {"success": False, "error": str(response['error'])}
-                if 'result' in response:
-                    return response['result']
-                    
-                return response
-
-            except (OSError, ConnectionError, TimeoutError) as e:
+        for _attempt in range(2):
+            if self.connected and self._is_stale(self._conn):
                 self.close()
-                last_error = self._communication_error(e)
-                if attempt < max_retries - 1:
-                    continue  # Retry
-        
-        # All retries failed
-        if last_error:
-            raise last_error
-        raise ConnectionError("Unknown communication error")
+            if not self.connected and not self.connect():
+                raise ConnectionError(self._unreachable_message())
 
-    def close(self):
-        raise NotImplementedError
+            try:
+                response = self._exchange_with_timeout(req_json, method)
+            except RequestNotSentError as exc:
+                # Stale connection (e.g. bridge script reloaded): nothing
+                # reached CE, so reconnecting and resending is safe.
+                self.close()
+                last_error = exc
+                continue
+            except TimeoutError as exc:
+                if self._conn is not None:
+                    # Raised by the transport itself rather than the CE_MCP_TIMEOUT
+                    # guard: the stream state is unknown, so drop the connection.
+                    self.close()
+                    raise TimeoutError(
+                        f"Command '{method}' timed out ({exc}); it was sent and was not retried."
+                    ) from exc
+                raise
+            except ProtocolError as exc:
+                self.close()
+                raise ConnectionError(
+                    f"Protocol error on '{method}': {exc}. The command ran in CE but its "
+                    "response could not be read; it was not retried."
+                ) from exc
+            except (OSError, ConnectionError) as exc:
+                self.close()
+                raise ConnectionError(
+                    f"Connection to {self._endpoint_description()} lost after '{method}' was "
+                    f"sent: {exc}. The command may or may not have run in Cheat Engine; it "
+                    "was not retried automatically."
+                ) from exc
+
+            return self._unwrap_response(response, request_id, method)
+
+        raise ConnectionError(
+            f"Could not deliver '{method}' to {self._endpoint_description()}: {last_error}"
+        )
+
+    def _unwrap_response(self, response, request_id, method):
+        if not isinstance(response, dict):
+            self.close()
+            raise ConnectionError(f"Protocol error on '{method}': response is not a JSON object.")
+        resp_id = response.get("id")
+        if resp_id is not None and resp_id != request_id:
+            self.close()
+            raise ConnectionError(
+                f"Protocol error on '{method}': response id {resp_id!r} does not match "
+                f"request id {request_id!r} (stream out of sync); connection reset."
+            )
+        if 'error' in response:
+            err = response['error']
+            if isinstance(err, dict):
+                code = err.get("code")
+                message = err.get("message") or str(err)
+            else:
+                code, message = None, str(err)
+            result = {
+                "success": False,
+                "error": message,
+                "error_code": _JSONRPC_ERROR_CODES.get(code, "INTERNAL_ERROR"),
+            }
+            if code is not None:
+                result["jsonrpc_code"] = code
+            return result
+        if 'result' in response:
+            return response['result']
+        return response
+
+
+# Win32 error codes used when connecting to the pipe.
+_ERROR_FILE_NOT_FOUND = 2
+_ERROR_PIPE_BUSY = 231
+# The Lua worker recreates the pipe ~50 ms after a client disconnects.
+_PIPE_MISSING_WAIT_SECONDS = 0.5
+# Upper bound on waiting for a busy pipe (CE still running a previous command).
+_PIPE_BUSY_WAIT_SECONDS = 5.0
+
+
+def _winerror(exc):
+    code = getattr(exc, "winerror", None)
+    if code is None and getattr(exc, "args", None):
+        code = exc.args[0]
+    return code
 
 
 class CENamedPipeBridgeClient(CEBridgeClient):
     def __init__(self):
         super().__init__()
-        self.handle = None
         if win32file is None or pywintypes is None:
             raise RuntimeError(
                 "Named pipe transport requires Windows and pywin32. "
                 "Set CE_MCP_TRANSPORT=tcp when the MCP server cannot open the Windows pipe directly."
             )
 
-    @property
-    def connected(self):
-        return self.handle is not None
+    def _open(self):
+        """Open the pipe, waiting briefly while it is busy or being recreated."""
+        start = time.monotonic()
+        busy_budget = _PIPE_BUSY_WAIT_SECONDS
+        if self.timeout_seconds is not None:
+            busy_budget = min(busy_budget, self.timeout_seconds)
+        missing_deadline = None
+        while True:
+            try:
+                return win32file.CreateFile(
+                    PIPE_NAME,
+                    win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                    0,
+                    None,
+                    win32file.OPEN_EXISTING,
+                    0,
+                    None
+                )
+            except pywintypes.error as exc:
+                code = _winerror(exc)
+                now = time.monotonic()
+                elapsed = now - start
+                if code == _ERROR_PIPE_BUSY and elapsed < busy_budget:
+                    missing_deadline = None
+                    wait_ms = max(1, int(min(1.0, busy_budget - elapsed) * 1000))
+                    if win32pipe is not None:
+                        try:
+                            win32pipe.WaitNamedPipe(PIPE_NAME, wait_ms)
+                        except pywintypes.error:
+                            pass  # timed out or pipe vanished; loop re-checks
+                    else:
+                        time.sleep(wait_ms / 1000.0)
+                    continue
+                if code == _ERROR_FILE_NOT_FOUND:
+                    # Covers the gap while the Lua worker recreates the pipe,
+                    # including right after a busy wait ends.
+                    if missing_deadline is None:
+                        missing_deadline = now + _PIPE_MISSING_WAIT_SECONDS
+                    if now < missing_deadline:
+                        time.sleep(0.05)
+                        continue
+                raise
 
-    def connect(self):
-        """Attempts to connect to the CE Named Pipe."""
-        try:
-            self.handle = win32file.CreateFile(
-                PIPE_NAME,
-                win32file.GENERIC_READ | win32file.GENERIC_WRITE,
-                0,
-                None,
-                win32file.OPEN_EXISTING,
-                0,
-                None
-            )
-            return True
-        except pywintypes.error:
-            return False
+    def _close_conn(self, conn):
+        win32file.CloseHandle(conn)
 
-    def _endpoint_description(self):
-        return "Cheat Engine Bridge (v12/v99 pipe)"
+    def _write(self, conn, data):
+        win32file.WriteFile(conn, data)
 
-    def _communication_error(self, error):
-        if pywintypes is not None and isinstance(error, pywintypes.error):
-            return ConnectionError(f"Pipe communication failed: {error}")
-        return error
-
-    def _read_exact(self, size):
+    def _read_exact(self, conn, size):
         chunks = []
         remaining = size
         while remaining > 0:
             try:
-                chunk = win32file.ReadFile(self.handle, remaining)[1]
+                chunk = win32file.ReadFile(conn, remaining)[1]
             except pywintypes.error as exc:
                 raise ConnectionError(f"Pipe communication failed: {exc}") from exc
             if not chunk:
@@ -355,29 +551,25 @@ class CENamedPipeBridgeClient(CEBridgeClient):
             remaining -= len(chunk)
         return b"".join(chunks)
 
-    def _exchange_once(self, req_json):
-        """Send one framed request to the named pipe and parse one response."""
-        header = struct.pack('<I', len(req_json))
-        try:
-            win32file.WriteFile(self.handle, header)
-            win32file.WriteFile(self.handle, req_json)
-        except pywintypes.error as exc:
-            raise ConnectionError(f"Pipe communication failed: {exc}") from exc
+    def _endpoint_description(self):
+        return "Cheat Engine Bridge (v12/v99 pipe)"
 
-        resp_header_buffer = self._read_exact(4)
-        resp_len = struct.unpack('<I', resp_header_buffer)[0]
-        if resp_len > MAX_RESPONSE_SIZE_BYTES:
-            raise ConnectionError(f"Response too large: {resp_len} bytes")
-        resp_body_buffer = self._read_exact(resp_len)
-        return self._decode_response(resp_header_buffer, resp_body_buffer)
-
-    def close(self):
-        if self.handle:
-            try:
-                win32file.CloseHandle(self.handle)
-            except Exception:
-                pass
-            self.handle = None
+    def _unreachable_message(self):
+        err = self.last_connect_error
+        code = _winerror(err) if err is not None else None
+        if code == _ERROR_PIPE_BUSY:
+            return (
+                f"{self._endpoint_description()} is busy: Cheat Engine is most likely still "
+                "executing an earlier command that timed out. Retry once it finishes, or "
+                "raise CE_MCP_TIMEOUT for long operations."
+            )
+        if code == _ERROR_FILE_NOT_FOUND:
+            return (
+                f"{self._endpoint_description()} is not reachable: pipe {PIPE_NAME} does not "
+                "exist. Is Cheat Engine running with ce_mcp_bridge.lua loaded?"
+            )
+        detail = f" ({err})" if err is not None else ""
+        return f"{self._endpoint_description()} is not reachable{detail}."
 
 
 class CETcpBridgeClient(CEBridgeClient):
@@ -385,61 +577,51 @@ class CETcpBridgeClient(CEBridgeClient):
         super().__init__()
         self.host = host
         self.port = port
-        self.sock = None
 
-    @property
-    def connected(self):
-        return self.sock is not None
+    def _open(self):
+        sock = socket.create_connection((self.host, self.port), timeout=self.timeout_seconds)
+        # The helper-thread join enforces CE_MCP_TIMEOUT; the socket timeout is
+        # only a backstop, kept longer so the two never race.
+        sock.settimeout(None if self.timeout_seconds is None else self.timeout_seconds + 5.0)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        return sock
 
-    def connect(self):
-        """Attempts to connect to the TCP relay."""
+    def _close_conn(self, conn):
+        conn.close()
+
+    def _is_stale(self, conn):
+        # A peer that has closed shows up as readable with EOF. Checking before
+        # sending lets a dead connection be replaced without risking a resend
+        # of a request that was already delivered.
         try:
-            connect_timeout = self.timeout_seconds if self.timeout_seconds is not None else None
-            self.sock = socket.create_connection((self.host, self.port), timeout=connect_timeout)
-            self.sock.settimeout(connect_timeout)
+            readable, _, _ = select.select([conn], [], [], 0)
+            if not readable:
+                return False
+            return conn.recv(1, socket.MSG_PEEK) == b""
+        except (OSError, ValueError):
             return True
-        except OSError:
-            self.close()
-            return False
 
-    def _endpoint_description(self):
-        return f"Cheat Engine Bridge TCP relay ({self.host}:{self.port})"
+    def _write(self, conn, data):
+        conn.sendall(data)
 
-    def _communication_error(self, error):
-        if isinstance(error, OSError):
-            return ConnectionError(f"TCP relay communication failed: {error}")
-        return error
-
-    def _read_exact(self, size):
+    def _read_exact(self, conn, size):
         chunks = []
         remaining = size
         while remaining > 0:
-            chunk = self.sock.recv(remaining)
+            chunk = conn.recv(remaining)
             if not chunk:
                 raise ConnectionError("Connection closed while reading from TCP relay.")
             chunks.append(chunk)
             remaining -= len(chunk)
         return b"".join(chunks)
 
-    def _exchange_once(self, req_json):
-        """Send one framed request to the TCP relay and parse one response."""
-        header = struct.pack('<I', len(req_json))
-        self.sock.sendall(header + req_json)
+    def _endpoint_description(self):
+        return f"Cheat Engine Bridge TCP relay ({self.host}:{self.port})"
 
-        resp_header_buffer = self._read_exact(4)
-        resp_len = struct.unpack('<I', resp_header_buffer)[0]
-        if resp_len > MAX_RESPONSE_SIZE_BYTES:
-            raise ConnectionError(f"Response too large: {resp_len} bytes")
-        resp_body_buffer = self._read_exact(resp_len)
-        return self._decode_response(resp_header_buffer, resp_body_buffer)
-
-    def close(self):
-        if self.sock:
-            try:
-                self.sock.close()
-            except OSError:
-                pass
-            self.sock = None
+    def _unreachable_message(self):
+        err = self.last_connect_error
+        detail = f": {err}" if err is not None else ""
+        return f"{self._endpoint_description()} is not reachable{detail}. Is ce_tcp_relay.py running?"
 
 
 def _create_bridge_client():

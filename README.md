@@ -309,7 +309,7 @@ Check these in order:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CE_MCP_TIMEOUT` | `30` | Timeout (seconds) for each MCP tool call. |
+| `CE_MCP_TIMEOUT` | `30` | Timeout (seconds) for each MCP tool call; `<=0` disables it. A timed-out command is not retried and may still be running in Cheat Engine, so raise this for long scans. |
 | `CE_MCP_ALLOW_SHELL` | *unset* | Set to `1` to enable `run_command` / `shell_execute` tools. **Arbitrary code execution risk** — leave unset by default. |
 
 ---

@@ -15,15 +15,18 @@ to another machine.
 from __future__ import annotations
 
 import argparse
+import json
 import socket
 import socketserver
 import struct
 import sys
+import time
 from typing import Optional
 
 try:
     import pywintypes
     import win32file
+    import win32pipe
 except ImportError as exc:  # pragma: no cover - Windows-only helper
     print("ce_tcp_relay.py must run on Windows with pywin32 installed.", file=sys.stderr)
     raise SystemExit(1) from exc
@@ -71,20 +74,60 @@ def validate_frame_size(size: int, direction: str) -> None:
         )
 
 
+ERROR_FILE_NOT_FOUND = 2
+ERROR_PIPE_BUSY = 231
+PIPE_BUSY_WAIT_MS = 5000
+
+
 def open_pipe():
-    return win32file.CreateFile(
-        PIPE_NAME,
-        win32file.GENERIC_READ | win32file.GENERIC_WRITE,
-        0,
-        None,
-        win32file.OPEN_EXISTING,
-        0,
-        None,
-    )
+    """Open the CE pipe, waiting briefly if it is busy or being recreated."""
+    for attempt in range(10):
+        try:
+            return win32file.CreateFile(
+                PIPE_NAME,
+                win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                0,
+                None,
+                win32file.OPEN_EXISTING,
+                0,
+                None,
+            )
+        except pywintypes.error as exc:
+            code = exc.args[0] if exc.args else None
+            if code == ERROR_PIPE_BUSY and attempt == 0:
+                try:
+                    win32pipe.WaitNamedPipe(PIPE_NAME, PIPE_BUSY_WAIT_MS)
+                except pywintypes.error:
+                    pass
+                continue
+            if code == ERROR_FILE_NOT_FOUND and attempt < 9:
+                time.sleep(0.05)  # Lua worker recreates the pipe ~50 ms after a disconnect
+                continue
+            raise
+
+
+def error_frame(req_body: bytes, code: int, message: str) -> bytes:
+    """Build a JSON-RPC error response frame for the request in req_body."""
+    try:
+        req_id = json.loads(req_body.decode("utf-8", errors="replace")).get("id")
+    except (ValueError, AttributeError):
+        req_id = None
+    body = json.dumps(
+        {"jsonrpc": "2.0", "error": {"code": code, "message": message}, "id": req_id},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return struct.pack("<I", len(body)) + body
 
 
 class RelayHandler(socketserver.BaseRequestHandler):
-    """Relay one TCP client connection to one persistent CE pipe connection."""
+    """Relay one TCP client connection to the CE pipe.
+
+    The pipe is opened lazily per request and reopened after failures, and
+    pipe-side failures are reported to the client as JSON-RPC error frames
+    instead of dropping the TCP connection. That keeps the client's retry
+    rule intact: a request is resent to CE only if it was never written to
+    the pipe; once written, a failure is reported, never retried.
+    """
 
     pipe_handle = None
 
@@ -92,11 +135,46 @@ class RelayHandler(socketserver.BaseRequestHandler):
         self.pipe_handle = None
         self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
+    def _forward(self, req_header: bytes, req_body: bytes) -> bytes:
+        """Send one request to CE and return the response frame (or an error frame)."""
+        for attempt in range(2):
+            if self.pipe_handle is None:
+                try:
+                    self.pipe_handle = open_pipe()
+                except pywintypes.error as exc:
+                    code = exc.args[0] if exc.args else None
+                    if code == ERROR_PIPE_BUSY:
+                        msg = ("Cheat Engine bridge is busy (most likely still executing an "
+                               "earlier command that timed out). Request not sent.")
+                    else:
+                        msg = (f"Cheat Engine pipe {PIPE_NAME} is not available ({exc}). Is "
+                               "ce_mcp_bridge.lua loaded? Request not sent.")
+                    return error_frame(req_body, -32000, msg)
+            try:
+                win32file.WriteFile(self.pipe_handle, req_header + req_body)
+            except pywintypes.error:
+                # Stale pipe (e.g. bridge script reloaded): nothing reached CE.
+                self._close_pipe()
+                continue
+            try:
+                resp_header = read_pipe_exact(self.pipe_handle, 4)
+                resp_len = struct.unpack("<I", resp_header)[0]
+                validate_frame_size(resp_len, "response")
+                resp_body = read_pipe_exact(self.pipe_handle, resp_len)
+                return resp_header + resp_body
+            except (pywintypes.error, ConnectionError) as exc:
+                self._close_pipe()
+                return error_frame(
+                    req_body, -32000,
+                    f"Connection to Cheat Engine lost after the request was sent ({exc}). "
+                    "The command may or may not have run; it was not retried.",
+                )
+        return error_frame(req_body, -32000, "Could not write the request to the Cheat Engine pipe. Request not sent.")
+
     def handle(self) -> None:
         peer = f"{self.client_address[0]}:{self.client_address[1]}"
         print(f"[relay] TCP client connected: {peer}", file=sys.stderr, flush=True)
         try:
-            self.pipe_handle = open_pipe()
             while True:
                 req_header = read_socket_exact(self.request, 4)
                 if req_header is None:
@@ -106,17 +184,7 @@ class RelayHandler(socketserver.BaseRequestHandler):
                 req_body = read_socket_exact(self.request, req_len)
                 if req_body is None:
                     raise ConnectionError("TCP client disconnected before request body.")
-
-                win32file.WriteFile(self.pipe_handle, req_header)
-                win32file.WriteFile(self.pipe_handle, req_body)
-
-                resp_header = read_pipe_exact(self.pipe_handle, 4)
-                resp_len = struct.unpack("<I", resp_header)[0]
-                validate_frame_size(resp_len, "response")
-                resp_body = read_pipe_exact(self.pipe_handle, resp_len)
-                self.request.sendall(resp_header + resp_body)
-        except pywintypes.error as exc:
-            print(f"[relay] Windows pipe error for {peer}: {exc}", file=sys.stderr, flush=True)
+                self.request.sendall(self._forward(req_header, req_body))
         except (ConnectionError, OSError) as exc:
             print(f"[relay] Connection ended for {peer}: {exc}", file=sys.stderr, flush=True)
         finally:

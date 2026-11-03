@@ -6224,27 +6224,46 @@ local commandHandlers = {
 -- MAIN COMMAND PROCESSOR
 -- ============================================================================
 
+-- Frames larger than this are rejected in both directions (matches
+-- MAX_RESPONSE_SIZE_BYTES in mcp_cheatengine.py and the TCP relay).
+local MAX_FRAME_BYTES = 32 * 1024 * 1024
+
+-- JSON-RPC error codes used by the bridge. -32001 is server-defined and
+-- maps to error_code OUT_OF_RESOURCES on the Python side.
+local function rpcError(code, message, id)
+    return json.encode({ jsonrpc = "2.0", error = { code = code, message = message }, id = id })
+end
+
 local function executeCommand(jsonRequest)
     local ok, request = pcall(json.decode, jsonRequest)
-    if not ok or not request then
-        return json.encode({ jsonrpc = "2.0", error = { code = -32700, message = "Parse error" }, id = nil })
+    if not ok or type(request) ~= "table" then
+        return rpcError(-32700, "Parse error: " .. (ok and "request is not a JSON object" or tostring(request)))
     end
-    
+
     local method = request.method
     local params = request.params or {}
     local id = request.id
-    
+
     local handler = commandHandlers[method]
     if not handler then
-        return json.encode({ jsonrpc = "2.0", error = { code = -32601, message = "Method not found: " .. tostring(method) }, id = id })
+        return rpcError(-32601, "Method not found: " .. tostring(method), id)
     end
-    
+
     local ok2, result = pcall(handler, params)
     if not ok2 then
-        return json.encode({ jsonrpc = "2.0", error = { code = -32603, message = "Internal error: " .. tostring(result) }, id = id })
+        return rpcError(-32603, "Internal error: " .. tostring(result), id)
     end
-    
-    return json.encode({ jsonrpc = "2.0", result = result, id = id })
+
+    local ok3, encoded = pcall(json.encode, { jsonrpc = "2.0", result = result, id = id })
+    if not ok3 then
+        return rpcError(-32603, "Internal error: could not encode result of " .. tostring(method) .. ": " .. tostring(encoded), id)
+    end
+    if #encoded >= MAX_FRAME_BYTES then
+        return rpcError(-32001, string.format(
+            "Response too large (%d bytes, max %d). Request less data (offset/limit/size/max_results).",
+            #encoded, MAX_FRAME_BYTES - 1), id)
+    end
+    return encoded
 end
 
 -- ============================================================================
@@ -6252,6 +6271,45 @@ end
 -- ============================================================================
 -- Replaces v10 Timer architecture to prevent GUI Freezes.
 -- I/O happens in Worker Thread. Execution happens in Main Thread.
+
+-- Write one length-prefixed frame (4-byte little-endian length + body).
+-- Returns false if the pipe rejected the write (client gone).
+local function writeFrame(pipe, payload)
+    local n = #payload
+    local header = { n % 256, math.floor(n / 256) % 256, math.floor(n / 65536) % 256, math.floor(n / 16777216) % 256 }
+    if not pipe.writeBytes(header) then return false end
+    if n > 0 and not pipe.writeString(payload) then return false end
+    return true
+end
+
+-- Serve one request on a connected pipe (worker thread). Returns true to keep
+-- the connection, false to drop it. Every request that is read gets exactly
+-- one response frame unless the pipe itself is broken: the client must never
+-- be left waiting for a reply that will not come.
+local function serveOneRequest(thread, pipe)
+    local lenBytes = pipe.readBytes(4)
+    if not lenBytes or #lenBytes ~= 4 then return false end   -- disconnected or broken
+
+    local len = lenBytes[1] + (lenBytes[2] * 256) + (lenBytes[3] * 65536) + (lenBytes[4] * 16777216)
+    if len == 0 or len >= MAX_FRAME_BYTES then
+        -- The body was not consumed, so the stream cannot be resynchronised:
+        -- report the problem, then drop the connection.
+        writeFrame(pipe, rpcError(-32600, string.format("Invalid request frame length %d (max %d)", len, MAX_FRAME_BYTES - 1)))
+        return false
+    end
+
+    local payload = pipe.readString(len)
+    if not payload or #payload ~= len then return false end    -- short read: stream is broken
+
+    -- CRITICAL: execute on the main thread; all CE API calls must run there.
+    local response
+    thread.synchronize(function()
+        response = executeCommand(payload)
+    end)
+    if not response then response = rpcError(-32603, "Internal error: no response produced") end
+
+    return writeFrame(pipe, response)
+end
 
 local function PipeWorker(thread)
     log("Worker Thread Started - Waiting for connection...")
@@ -6287,46 +6345,15 @@ local function PipeWorker(thread)
             serverState.connected = true
             
             while not thread.Terminated and pipe.Connected do
-                -- Try to read header (4 bytes)
-                -- We use pcall to handle timeouts/errors gracefully
-                local ok, lenBytes = pcall(function() return pipe.readBytes(4) end)
-                
-                if ok and lenBytes and #lenBytes == 4 then
-                    local len = lenBytes[1] + (lenBytes[2] * 256) + (lenBytes[3] * 65536) + (lenBytes[4] * 16777216)
-                    
-                    -- Sanity check length
-                    if len > 0 and len < 32 * 1024 * 1024 then
-                        local payload = pipe.readString(len)
-                        
-                        if payload then
-                            -- CRITICAL: EXECUTE ON MAIN THREAD
-                            -- We pause the worker and run logic on GUI thread to be safe
-                            local response = nil
-                            thread.synchronize(function()
-                                response = executeCommand(payload)
-                            end)
-                            
-                            -- Write response back (Worker Thread)
-                            if response then
-                                local rLen = #response
-                                local b1 = rLen % 256
-                                local b2 = math.floor(rLen / 256) % 256
-                                local b3 = math.floor(rLen / 65536) % 256
-                                local b4 = math.floor(rLen / 16777216) % 256
-                                
-                                pipe.writeBytes({b1, b2, b3, b4})
-                                pipe.writeString(response)
-                            end
-                        else
-                             -- log("Thread: Read payload failed (nil)")
-                        end
-                    end
-                else
-                    -- Read failed. If pipe disconnected, the loop will terminate on next check.
-                    if not pipe.Connected then
-                        -- Client disconnected gracefully
-                    end
+                -- pcall so an unexpected error drops this connection instead
+                -- of killing the worker thread (which would leave the bridge
+                -- dead until the script is reloaded).
+                local ok, keep = pcall(serveOneRequest, thread, pipe)
+                if not ok then
+                    log("Request loop error (dropping connection): " .. tostring(keep))
+                    break
                 end
+                if not keep then break end
             end
             
             serverState.connected = false
