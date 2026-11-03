@@ -221,9 +221,11 @@ class CEBridgeClient:
         resp_len = struct.unpack('<I', resp_header_buffer)[0]
         if resp_len > MAX_RESPONSE_SIZE_BYTES:
             raise ConnectionError(f"Response too large: {resp_len} bytes")
+        # The Lua encoder escapes non-UTF-8 bytes, but decode leniently anyway:
+        # one bad byte must never cost the whole response.
         try:
-            return json.loads(resp_body_buffer.decode('utf-8'))
-        except json.JSONDecodeError as exc:
+            return json.loads(resp_body_buffer.decode('utf-8', errors='replace'))
+        except ValueError as exc:
             raise ConnectionError("Invalid JSON received from CE") from exc
 
     def _exchange_with_timeout(self, req_json, method):
@@ -274,7 +276,9 @@ class CEBridgeClient:
             }
             
             try:
-                req_json = json.dumps(request).encode('utf-8')
+                # ensure_ascii=False: send raw UTF-8 rather than \uXXXX escapes.
+                # errors='replace' guards against lone surrogates in tool input.
+                req_json = json.dumps(request, ensure_ascii=False).encode('utf-8', errors='replace')
                 response = self._exchange_with_timeout(req_json, method)
                 
                 if 'error' in response:
