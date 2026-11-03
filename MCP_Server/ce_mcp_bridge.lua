@@ -571,7 +571,12 @@ local json = (function()
     return true, max
   end
 
+  -- Sentinel that encodes as JSON null. Use it where a nil would otherwise
+  -- vanish, e.g. a trailing nil in an array (Lua cannot store its slot).
+  json.null = setmetatable({}, { __tostring = function() return "json.null" end })
+
   local function encode_table(val, stack)
+    if val == json.null then return "null" end
     stack = stack or {}
     if stack[val] then error("circular reference") end
     stack[val] = true
@@ -972,31 +977,36 @@ function cmd_read_integer(params)
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end
     
-    local val
+    local val, floatHex
     if itype == "byte" then
         local b = readBytes(addr, 1, true)
         if b and #b > 0 then val = b[1] end
     elseif itype == "word" then val = readSmallInteger(addr)
     elseif itype == "dword" then val = readInteger(addr)
     elseif itype == "qword" then val = readQword(addr)
-    elseif itype == "float" then val = readFloat(addr)
-    elseif itype == "double" then val = readDouble(addr)
+    elseif itype == "float" or itype == "double" then
+        -- One snapshot for both fields: separate readFloat + readInteger calls
+        -- could straddle a write by the target and pair a value with the bits
+        -- of a different value.
+        local n = (itype == "float") and 4 or 8
+        local b = readBytes(addr, n, true)
+        if b and #b == n then
+            local raw = string.char(table.unpack(b))
+            if n == 4 then
+                val = string.unpack("<f", raw)
+                floatHex = string.format("0x%08X", string.unpack("<I4", raw))
+            else
+                val = string.unpack("<d", raw)
+                floatHex = string.format("0x%016X", string.unpack("<i8", raw))
+            end
+        end
     else return { success = false, error = "Unknown type: " .. tostring(itype) } end
     
     if val == nil then return { success = false, error = "Failed to read at " .. toHex(addr) } end
 
     -- For float/double, "hex" is the raw IEEE-754 bit pattern (what you would
     -- AOB-scan for or patch), not the truncated numeric value.
-    local hex
-    if itype == "float" then
-        local bits = readInteger(addr)
-        hex = bits and string.format("0x%08X", bits & 0xFFFFFFFF) or nil
-    elseif itype == "double" then
-        local bits = readQword(addr)
-        hex = bits and string.format("0x%016X", bits) or nil
-    else
-        hex = toHex(val)
-    end
+    local hex = floatHex or toHex(val)
 
     return { success = true, address = toHex(addr), value = val, type = itype, hex = hex }
 end
@@ -1922,8 +1932,14 @@ function cmd_evaluate_lua(params)
 
     -- result: tostring() of the first return value (backward compatible).
     -- results: every return value as structured JSON (tables included).
+    -- nil return values become json.null so trailing nils keep their slot
+    -- (`return 42, nil` -> [42, null], matching result_count).
     local results = {}
-    for i = 2, packed.n do results[i - 1] = toPlainData(packed[i]) end
+    for i = 2, packed.n do
+        local v = toPlainData(packed[i])
+        if v == nil then v = json.null end
+        results[i - 1] = v
+    end
     return { success = true, result = tostring(packed[2]), results = results, result_count = packed.n - 1 }
 end
 

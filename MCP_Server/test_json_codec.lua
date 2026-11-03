@@ -88,6 +88,9 @@ check("circular errors", (function()
     return not pcall(enc, t)
 end)())
 check("functions -> null",      enc({f = print}) == '{"f":null}')
+check("json.null sentinel",     enc(json.null) == "null")
+check("json.null keeps trailing slot", enc({42, json.null}) == "[42,null]", enc({42, json.null}))
+check("json.null in object",    enc({a = json.null}) == '{"a":null}')
 
 -- ---------------------------------------------------------------- round trip
 local req = '{"jsonrpc":"2.0","method":"write_string","params":{"address":"0x7FF612345678","value":"\\u65e5\\u672c \\u00e9","addr_int":140694844102264,"bytes":[144,144,195]},"id":1730000000123}'

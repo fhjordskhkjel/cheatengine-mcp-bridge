@@ -277,7 +277,7 @@
 - `success` (bool)
 - `address` (str)
 - `value` (int|float): Numeric value. Integers (including full 64-bit qwords) are exact; qwords are signed, so use `hex` for pointers above 2^63.
-- `hex` (str): Hex representation. For `float`/`double` this is the raw IEEE-754 bit pattern (e.g. `87.5` → `"0x42AF0000"`), which is what you would AOB-scan for or patch.
+- `hex` (str): Hex representation. For `float`/`double` this is the raw IEEE-754 bit pattern, decoded from the same single read as `value` (e.g. `87.5` → `"0x42AF0000"`), which is what you would AOB-scan for or patch.
 
 **Example request:**
 ```json
@@ -1085,7 +1085,7 @@ Capture errors inside the hit callback never leave the target suspended: the thr
 **Returns:** JSON with:
 - `success` (bool)
 - `result` (str): `tostring()` of the first return value (kept for backward compatibility).
-- `results` (array): Every return value as structured JSON. Tables are converted recursively (max depth 8, max 10000 keys per table, cycles become `"<cycle: ...>"`); functions/userdata become their `tostring()`.
+- `results` (array): Every return value as structured JSON, one slot per value (`nil` → `null`, so `return 42, nil` gives `[42, null]`). Tables are converted recursively (max depth 8, max 10000 keys per table, cycles become `"<cycle: ...>"`); functions/userdata become their `tostring()`.
 - `result_count` (int): Number of return values.
 
 **Example request:**
