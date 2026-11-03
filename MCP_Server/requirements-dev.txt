@@ -1,0 +1,5 @@
+# Offline test suite (no Cheat Engine needed):  python -m pytest MCP_Server/tests
+# On Windows also install requirements.txt (pywin32) to run the named-pipe tests.
+mcp>=1.28,<2
+pytest>=8
+lupa>=2.0  # embeds Lua 5.3 (CE's version) and 5.4 for the Lua-side tests

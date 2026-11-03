@@ -283,12 +283,15 @@ local function parseAddress(input)
     return addr, nil
 end
 
+-- The one process guard for every unit. Returns true when a process is
+-- attached, otherwise false plus a ready-to-return NO_PROCESS error table:
+--   local ok, err = requireProcess(); if not ok then return err end
+-- (Units used to define their own copies with three different contracts.)
 local function requireProcess()
-    -- Returns nil if a process is attached; returns an error table otherwise.
     if (getOpenedProcessID() or 0) == 0 then
-        return { success = false, error = "No process attached", error_code = "NO_PROCESS" }
+        return false, { success = false, error = "No process attached", error_code = "NO_PROCESS" }
     end
-    return nil
+    return true, nil
 end
 
 local function findModulesViaMZScan(maxCount)
@@ -3952,13 +3955,6 @@ end
 serverState.persistent_scans = serverState.persistent_scans or {}
 
 -- Helper: NO_PROCESS guard used by all Unit-15 commands
-local function requireProcess()
-    local pid = getOpenedProcessID()
-    if not pid or pid == 0 then
-        return false, { success = false, error = "No process attached", error_code = "NO_PROCESS" }
-    end
-    return true, nil
-end
 
 -- Helper: map human-readable var-type string to CE constant
 local function resolveVarType(vtype)
@@ -4361,10 +4357,7 @@ end
 -- COMMAND HANDLERS - MEMORY OPERATIONS (Unit 14)
 -- ============================================================================
 
-local function sanitizeFilename(f)
-    if type(f) ~= "string" or f:find("%.%.") then return nil, "Invalid filename" end
-    return f, nil
-end
+-- sanitizeFilename() is shared with UNIT-20a (defined above).
 
 function cmd_copy_memory(params)
     local pid = getOpenedProcessID()
@@ -4565,12 +4558,6 @@ end
 -- ============================================================================
 
 -- Helper: check process is attached (for tools that need a target process address)
-local function requireProcess()
-    if (getOpenedProcessID() or 0) == 0 then
-        return false, { success = false, error = "No process attached", error_code = "NO_PROCESS" }
-    end
-    return true, nil
-end
 -- >>> BEGIN UNIT-12 Symbol Management <<<
 function cmd_register_symbol(params)
     local name = params.name
@@ -5303,13 +5290,9 @@ function cmd_unpause_process(params) return callWithProcessGuard(unpause) end
 -- Lua 5.1 compat: 'unpack' moved to 'table.unpack' in Lua 5.2+
 local unpack = unpack or table.unpack
 
-local function requireProcess()
-    local pid = getOpenedProcessID()
-    return pid and pid > 0
-end
 
 function cmd_inject_dll(params)
-    if not requireProcess() then return { success = false, error = "No process attached" } end
+    local ok, err = requireProcess(); if not ok then return err end
     local filepath = params.filepath
     if not filepath then return { success = false, error = "No filepath provided" } end
     local skip = params.skip_symbol_reload or false
@@ -5322,7 +5305,7 @@ function cmd_inject_dll(params)
 end
 
 function cmd_inject_dotnet_dll(params)
-    if not requireProcess() then return { success = false, error = "No process attached" } end
+    local ok, err = requireProcess(); if not ok then return err end
     local dllpath    = params.filepath
     local className  = params.class_name
     local methodName = params.method_name
@@ -5342,7 +5325,7 @@ function cmd_inject_dotnet_dll(params)
 end
 
 function cmd_execute_code(params)
-    if not requireProcess() then return { success = false, error = "No process attached" } end
+    local ok, err = requireProcess(); if not ok then return err end
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end
@@ -5359,7 +5342,7 @@ function cmd_execute_code(params)
 end
 
 function cmd_execute_code_ex(params)
-    if not requireProcess() then return { success = false, error = "No process attached" } end
+    local ok, err = requireProcess(); if not ok then return err end
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end
@@ -5377,7 +5360,7 @@ function cmd_execute_code_ex(params)
 end
 
 function cmd_execute_method(params)
-    if not requireProcess() then return { success = false, error = "No process attached" } end
+    local ok, err = requireProcess(); if not ok then return err end
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end
