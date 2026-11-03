@@ -739,24 +739,36 @@ def dissect_structure(address: str, size: int = 256) -> str:
 # --- DEBUGGING & BREAKPOINTS ---
 
 @mcp.tool()
-def set_breakpoint(address: str, id: str = None, capture_registers: bool = True, capture_stack: bool = False, stack_depth: int = 16) -> str:
-    """Set a hardware execution breakpoint. Non-breaking/Logging only."""
+def set_breakpoint(address: str, id: str = None, capture_registers: bool = True, capture_stack: bool = False, stack_depth: int = 16, max_hits: int = 1000) -> str:
+    """Set a hardware execution breakpoint. Non-breaking/Logging only.
+
+    Args:
+        capture_stack: Record stack slots; hit.stack[0] is [SP+0] (the return
+            address on a function-entry breakpoint).
+        max_hits: Hit buffer size (1-100000, default 1000). Only the newest
+            hits are kept; hit_count/dropped_hits report the overflow.
+    """
     return format_result(ce_client.send_command("set_breakpoint", {
-        "address": address, 
+        "address": address,
         "id": id,
         "capture_registers": capture_registers,
         "capture_stack": capture_stack,
-        "stack_depth": stack_depth
+        "stack_depth": stack_depth,
+        "max_hits": max_hits,
     }))
 
 @mcp.tool()
-def set_data_breakpoint(address: str, id: str = None, access_type: str = "w", size: int = 4) -> str:
-    """Set a hardware data breakpoint (watchpoint). Types: 'r' (read), 'w' (write), 'rw' (access)."""
+def set_data_breakpoint(address: str, id: str = None, access_type: str = "w", size: int = 4, max_hits: int = 1000) -> str:
+    """Set a hardware data breakpoint (watchpoint). Types: 'r' (read), 'w' (write), 'rw' (access).
+
+    max_hits: Hit buffer size (1-100000, default 1000); only the newest hits are kept.
+    """
     return format_result(ce_client.send_command("set_data_breakpoint", {
-        "address": address, 
+        "address": address,
         "id": id,
         "access_type": access_type,
-        "size": size
+        "size": size,
+        "max_hits": max_hits,
     }))
 
 @mcp.tool()
@@ -784,7 +796,9 @@ def get_breakpoint_hits(id: str = None, clear: bool = False, offset: int = 0, li
         offset: Start index for pagination (default 0).
         limit: Maximum hits to return (default 100, max 10000).
 
-    Returns JSON with: success, total, offset, limit, returned, hits.
+    Returns JSON with: success, total, offset, limit, returned, hits, plus
+    hit_count / dropped_hits / max_hits for a single id, or a per-id "stats"
+    map when querying all breakpoints. Each hit carries a hit_number.
     """
     return format_result(ce_client.send_command("get_breakpoint_hits", {"id": id, "clear": clear, "offset": offset, "limit": limit}))
 
@@ -956,7 +970,12 @@ def get_physical_address_cr3(cr3: str, virtual_address: str) -> str:
 
 @mcp.tool()
 def evaluate_lua(code: str) -> str:
-    """Execute arbitrary Lua code in Cheat Engine."""
+    """Execute arbitrary Lua code in Cheat Engine.
+
+    Returns JSON with: success, result (tostring of the first return value),
+    results (every return value as structured JSON; tables are converted with
+    depth/size limits and cycle detection), result_count.
+    """
     return format_result(ce_client.send_command("evaluate_lua", {"code": code}))
 
 @mcp.tool()
@@ -1881,13 +1900,17 @@ def debug_get_last_branch_record(index: int) -> str:
     return format_result(ce_client.send_command("debug_get_last_branch_record", {"index": index}))
 
 @mcp.tool()
-def debug_set_breakpoint_for_thread(thread_id: int, address: str, size: int = 1, trigger: str = "execute") -> str:
-    """Set a breakpoint that fires only on a specific thread. trigger: execute|write|read|access."""
+def debug_set_breakpoint_for_thread(thread_id: int, address: str, size: int = 1, trigger: str = "execute", max_hits: int = 1000) -> str:
+    """Set a breakpoint that fires only on a specific thread. trigger: execute|write|read|access.
+
+    max_hits: Hit buffer size (1-100000, default 1000); only the newest hits are kept.
+    """
     return format_result(ce_client.send_command("debug_set_breakpoint_for_thread", {
         "thread_id": thread_id,
         "address": address,
         "size": size,
         "trigger": trigger,
+        "max_hits": max_hits,
     }))
 
 @mcp.tool()

@@ -26,6 +26,13 @@ local serverState = {
 
 local function toHex(num)
     if not num then return "nil" end
+    if math.type(num) == "float" then
+        -- string.format("%X") raises on non-integral floats ("number has no
+        -- integer representation"), which used to abort the whole command.
+        local i = (num == num) and math.tointeger(math.floor(num)) or nil
+        if not i then return tostring(num) end
+        num = i
+    end
     if num >= 0 and num <= 0xFFFFFFFF then
         return string.format("0x%08X", num)
     else
@@ -106,6 +113,10 @@ local function captureStack(depth)
     local stackPtr = arch.stackPtr
     if not stackPtr then return stack end
     
+    -- stack[1] is [SP+0], stack[n] is [SP+(n-1)*ptrSize]. This used to be
+    -- 0-based, and the array encoder starts at 1, so [SP+0] (the return
+    -- address on a function-entry breakpoint) was silently dropped.
+    -- Unreadable slots encode as null so indices stay aligned.
     for i = 0, depth - 1 do
         local val
         if arch.is64bit then
@@ -113,7 +124,7 @@ local function captureStack(depth)
         else
             val = readInteger(stackPtr + i * arch.ptrSize)
         end
-        if val then stack[i] = toHex(val) end
+        stack[i + 1] = val and toHex(val) or nil
     end
     return stack
 end
@@ -130,6 +141,61 @@ local function paginate(params, items, defaultLimit)
         page[#page + 1] = items[i]
     end
     return limit, offset, page, total
+end
+
+-- Breakpoint hit buffers are ring buffers: only the newest max_hits entries
+-- are kept per breakpoint, so a breakpoint on a hot path cannot grow CE's
+-- memory without bound or produce a response larger than the frame cap.
+local DEFAULT_MAX_BP_HITS = 1000
+
+local function parseMaxHits(value)
+    local n = tonumber(value) or DEFAULT_MAX_BP_HITS
+    return math.max(1, math.min(math.floor(n), 100000))
+end
+
+-- Append a hit for bpId. Creates the buffer lazily: get_breakpoint_hits(clear)
+-- may have replaced serverState.breakpoint_hits while the breakpoint is live.
+local function recordBreakpointHit(bpId, hitData)
+    local hits = serverState.breakpoint_hits[bpId]
+    if not hits then
+        hits = {}
+        serverState.breakpoint_hits[bpId] = hits
+    end
+    local bp = serverState.breakpoints[bpId]
+    local maxHits = (bp and bp.max_hits) or DEFAULT_MAX_BP_HITS
+    if bp then
+        bp.hit_count = (bp.hit_count or 0) + 1
+        hitData.hit_number = bp.hit_count
+    end
+    hits[#hits + 1] = hitData
+    while #hits > maxHits do
+        table.remove(hits, 1)
+        if bp then bp.dropped_hits = (bp.dropped_hits or 0) + 1 end
+    end
+end
+
+-- Run a breakpoint's capture function, always resuming the target afterwards.
+-- An error inside capture used to skip debug_continueFromBreakpoint and leave
+-- the target thread suspended; now it is recorded as a hit with an error field.
+local function handleBreakpointHit(bpId, addr, capture)
+    local ok, err = pcall(function() recordBreakpointHit(bpId, capture()) end)
+    if not ok then
+        pcall(recordBreakpointHit, bpId, {
+            id = bpId, address = toHex(addr), timestamp = os.time(),
+            error = "hit capture failed: " .. tostring(err),
+        })
+    end
+    debug_continueFromBreakpoint(co_run)
+    return 1
+end
+
+-- Public stats for a breakpoint record (used by list/get_breakpoint_hits).
+local function breakpointStats(bp)
+    return {
+        hit_count = bp.hit_count or 0,
+        dropped_hits = bp.dropped_hits or 0,
+        max_hits = bp.max_hits or DEFAULT_MAX_BP_HITS,
+    }
 end
 
 -- Map a human-readable scan_option to a CE scan constant.
@@ -918,8 +984,21 @@ function cmd_read_integer(params)
     else return { success = false, error = "Unknown type: " .. tostring(itype) } end
     
     if val == nil then return { success = false, error = "Failed to read at " .. toHex(addr) } end
-    
-    return { success = true, address = toHex(addr), value = val, type = itype, hex = toHex(val) }
+
+    -- For float/double, "hex" is the raw IEEE-754 bit pattern (what you would
+    -- AOB-scan for or patch), not the truncated numeric value.
+    local hex
+    if itype == "float" then
+        local bits = readInteger(addr)
+        hex = bits and string.format("0x%08X", bits & 0xFFFFFFFF) or nil
+    elseif itype == "double" then
+        local bits = readQword(addr)
+        hex = bits and string.format("0x%016X", bits) or nil
+    else
+        hex = toHex(val)
+    end
+
+    return { success = true, address = toHex(addr), value = val, type = itype, hex = hex }
 end
 
 function cmd_read_string(params)
@@ -1603,7 +1682,8 @@ function cmd_set_breakpoint(params)
     local captureRegs = params.capture_registers ~= false
     local captureStackFlag = params.capture_stack or false
     local stackDepth = params.stack_depth or 16
-    
+    local maxHits = parseMaxHits(params.max_hits)
+
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end
 
@@ -1638,29 +1718,26 @@ function cmd_set_breakpoint(params)
     -- CRITICAL: Use bpmDebugRegister for hardware breakpoints (anti-cheat safe)
     -- Signature: debug_setBreakpoint(address, size, trigger, breakpointmethod, function)
     debug_setBreakpoint(addr, 1, bptExecute, bpmDebugRegister, function()
-        local hitData = {
-            id = bpId,
-            address = toHex(addr),
-            timestamp = os.time(),
-            breakpoint_type = "hardware_execute"
-        }
-        
-        if captureRegs then
-            hitData.registers = captureRegisters()
-        end
-        
-        if captureStackFlag then
-            hitData.stack = captureStack(stackDepth)
-        end
-        
-        table.insert(serverState.breakpoint_hits[bpId], hitData)
-        debug_continueFromBreakpoint(co_run)
-        return 1
+        return handleBreakpointHit(bpId, addr, function()
+            local hitData = {
+                id = bpId,
+                address = toHex(addr),
+                timestamp = os.time(),
+                breakpoint_type = "hardware_execute"
+            }
+            if captureRegs then
+                hitData.registers = captureRegisters()
+            end
+            if captureStackFlag then
+                hitData.stack = captureStack(stackDepth)
+            end
+            return hitData
+        end)
     end)
-    
+
     serverState.hw_bp_slots[slot] = { id = bpId, address = addr }
-    serverState.breakpoints[bpId] = { address = addr, slot = slot, type = "execute" }
-    return { success = true, id = bpId, address = toHex(addr), slot = slot, method = "hardware_debug_register" }
+    serverState.breakpoints[bpId] = { address = addr, slot = slot, type = "execute", max_hits = maxHits }
+    return { success = true, id = bpId, address = toHex(addr), slot = slot, max_hits = maxHits, method = "hardware_debug_register" }
 end
 
 function cmd_set_data_breakpoint(params)
@@ -1668,7 +1745,8 @@ function cmd_set_data_breakpoint(params)
     local bpId = params.id
     local accessType = params.access_type or "w"  -- r, w, rw
     local size = params.size or 4
-    
+    local maxHits = parseMaxHits(params.max_hits)
+
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address" } end
 
@@ -1704,29 +1782,27 @@ function cmd_set_data_breakpoint(params)
     -- CRITICAL: Use bpmDebugRegister for hardware breakpoints (anti-cheat safe)
     -- Signature: debug_setBreakpoint(address, size, trigger, breakpointmethod, function)
     debug_setBreakpoint(addr, size, bpType, bpmDebugRegister, function()
-        local arch = getArchInfo()
-        local instPtr = arch.instPtr
-        local hitData = {
-            id = bpId,
-            type = "data_" .. accessType,
-            address = toHex(addr),
-            timestamp = os.time(),
-            breakpoint_type = "hardware_data",
-            value = arch.is64bit and readQword(addr) or readInteger(addr),
-            registers = captureRegisters(),
-            instruction = instPtr and disassemble(instPtr) or "???",
-            arch = arch.is64bit and "x64" or "x86"
-        }
-        
-        table.insert(serverState.breakpoint_hits[bpId], hitData)
-        debug_continueFromBreakpoint(co_run)
-        return 1
+        return handleBreakpointHit(bpId, addr, function()
+            local arch = getArchInfo()
+            local instPtr = arch.instPtr
+            return {
+                id = bpId,
+                type = "data_" .. accessType,
+                address = toHex(addr),
+                timestamp = os.time(),
+                breakpoint_type = "hardware_data",
+                value = arch.is64bit and readQword(addr) or readInteger(addr),
+                registers = captureRegisters(),
+                instruction = instPtr and disassemble(instPtr) or "???",
+                arch = arch.is64bit and "x64" or "x86"
+            }
+        end)
     end)
-    
+
     serverState.hw_bp_slots[slot] = { id = bpId, address = addr }
-    serverState.breakpoints[bpId] = { address = addr, slot = slot, type = "data" }
-    
-    return { success = true, id = bpId, address = toHex(addr), slot = slot, access_type = accessType, method = "hardware_debug_register" }
+    serverState.breakpoints[bpId] = { address = addr, slot = slot, type = "data", max_hits = maxHits }
+
+    return { success = true, id = bpId, address = toHex(addr), slot = slot, access_type = accessType, max_hits = maxHits, method = "hardware_debug_register" }
 end
 
 function cmd_remove_breakpoint(params)
@@ -1766,18 +1842,31 @@ function cmd_get_breakpoint_hits(params)
     end
 
     local limit, offset, page, total = paginate(params, hits, 100)
-    return { success = true, total = total, offset = offset, limit = limit, returned = #page, hits = page }
+    local result = { success = true, total = total, offset = offset, limit = limit, returned = #page, hits = page }
+    if bpId then
+        local bp = serverState.breakpoints[bpId]
+        if bp then
+            for k, v in pairs(breakpointStats(bp)) do result[k] = v end
+        end
+    else
+        local stats = {}
+        for id, bp in pairs(serverState.breakpoints) do stats[tostring(id)] = breakpointStats(bp) end
+        if next(stats) then result.stats = stats end
+    end
+    return result
 end
 
 function cmd_list_breakpoints(params)
     local list = {}
     for id, bp in pairs(serverState.breakpoints) do
-        table.insert(list, {
+        local entry = {
             id = id,
             address = toHex(bp.address),
             type = bp.type or "execution",
             slot = bp.slot
-        })
+        }
+        for k, v in pairs(breakpointStats(bp)) do entry[k] = v end
+        table.insert(list, entry)
     end
     return { success = true, count = #list, breakpoints = list }
 end
@@ -1798,17 +1887,44 @@ end
 -- COMMAND HANDLERS - LUA EVALUATION
 -- ============================================================================
 
+-- Convert an arbitrary Lua value into plain JSON-encodable data. Tables are
+-- copied with bounded depth/size and cycle detection; functions, userdata
+-- and CE objects become their tostring().
+local function toPlainData(v, depth, seen)
+    local t = type(v)
+    if t == "nil" or t == "boolean" or t == "number" or t == "string" then return v end
+    if t ~= "table" then return tostring(v) end
+    depth = depth or 0
+    seen = seen or {}
+    if seen[v] then return "<cycle: " .. tostring(v) .. ">" end
+    if depth >= 8 then return tostring(v) end
+    seen[v] = true
+    local out, n = {}, 0
+    for k, val in pairs(v) do
+        n = n + 1
+        if n > 10000 then out["__truncated"] = true; break end
+        local key = (type(k) == "number" or type(k) == "string") and k or tostring(k)
+        out[key] = toPlainData(val, depth + 1, seen)
+    end
+    seen[v] = nil
+    return out
+end
+
 function cmd_evaluate_lua(params)
     local code = params.code
     if not code then return { success = false, error = "No code provided" } end
-    
+
     local fn, err = load(code, "mcp_evaluate_lua", "t")
     if not fn then return { success = false, error = "Compile error: " .. tostring(err) } end
-    
-    local ok, result = pcall(fn)
-    if not ok then return { success = false, error = "Runtime error: " .. tostring(result) } end
-    
-    return { success = true, result = tostring(result) }
+
+    local packed = table.pack(pcall(fn))
+    if not packed[1] then return { success = false, error = "Runtime error: " .. tostring(packed[2]) } end
+
+    -- result: tostring() of the first return value (backward compatible).
+    -- results: every return value as structured JSON (tables included).
+    local results = {}
+    for i = 2, packed.n do results[i - 1] = toPlainData(packed[i]) end
+    return { success = true, result = tostring(packed[2]), results = results, result_count = packed.n - 1 }
 end
 
 -- >>> BEGIN UNIT-22 Threading Sync <<<
@@ -4950,6 +5066,7 @@ function cmd_debug_set_breakpoint_for_thread(params)
     local addr     = params.address
     local size     = params.size    or 1
     local trigger  = params.trigger or "execute"
+    local maxHits  = parseMaxHits(params.max_hits)
 
     if not threadId then return { success = false, error = "thread_id is required", error_code = "INVALID_PARAMS" } end
 
@@ -4972,15 +5089,15 @@ function cmd_debug_set_breakpoint_for_thread(params)
     serverState.breakpoint_hits[bpHandle] = {}
 
     local setOk, setErr = pcall(debug_setBreakpointForThread, threadId, addr, size, bpTrigger, bpmDebugRegister, function()
-        table.insert(serverState.breakpoint_hits[bpHandle], {
-            handle    = bpHandle,
-            thread_id = threadId,
-            address   = toHex(addr),
-            timestamp = os.time(),
-            registers = captureRegisters(),
-        })
-        debug_continueFromBreakpoint(co_run)
-        return 1
+        return handleBreakpointHit(bpHandle, addr, function()
+            return {
+                handle    = bpHandle,
+                thread_id = threadId,
+                address   = toHex(addr),
+                timestamp = os.time(),
+                registers = captureRegisters(),
+            }
+        end)
     end)
 
     if not setOk then
@@ -4988,7 +5105,7 @@ function cmd_debug_set_breakpoint_for_thread(params)
         return { success = false, error = "debug_setBreakpointForThread failed: " .. tostring(setErr), error_code = "CE_API_ERROR" }
     end
 
-    serverState.breakpoints[bpHandle] = { address = addr, type = "thread_bp", thread_id = threadId }
+    serverState.breakpoints[bpHandle] = { address = addr, type = "thread_bp", thread_id = threadId, max_hits = maxHits }
 
     return {
         success   = true,
@@ -4997,6 +5114,7 @@ function cmd_debug_set_breakpoint_for_thread(params)
         address   = toHex(addr),
         trigger   = trigger,
         size      = size,
+        max_hits  = maxHits,
     }
 end
 
