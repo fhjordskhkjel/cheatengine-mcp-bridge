@@ -27,7 +27,7 @@ jobs:
             $lua MCP_Server/test_json_codec.lua
             $lua MCP_Server/test_pointer_parse.lua
           done
-          luac5.3 -p MCP_Server/ce_mcp_bridge.lua
+          luac5.3 -p MCP_Server/ce_mcp_bridge.lua MCP_Server/bridge/*.lua
 
       - uses: actions/setup-python@v6
         with:

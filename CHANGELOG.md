@@ -2,6 +2,17 @@
 
 All notable changes to the Cheat Engine MCP Bridge. The wire protocol (`CE_MCP_Bridge_v99`) is unchanged; reload `ce_mcp_bridge.lua` and restart the MCP server to pick up a new version.
 
+## Unreleased
+
+### Changed
+
+- **The Lua bridge is split into modules.** `MCP_Server/ce_mcp_bridge.lua` is now a loader for 26 modules in `MCP_Server/bridge/` (core, JSON codec, one per tool area, dispatcher). Load it exactly as before, but keep the `bridge/` folder next to it. If CE runs the script without its file name, set `CE_MCP_BRIDGE_DIR` first. Each module is its own Lua chunk, so Cheat Engine's 200-local limit no longer applies to the whole bridge. Every dispatcher method returns the same results as before, apart from error-location prefixes, which now name the module file and line.
+
+### Fixed
+
+- **Reloading the script now stops the running bridge.** `StartMCPBridge` called `StopMCPBridge` after the reload had already replaced it with the new instance's version, so the old worker thread kept serving the pipe with the old code and its hardware breakpoints and DBVM watches were never removed. The loader now calls the previous instance's `StopMCPBridge` before loading anything; this also works when upgrading from the single-file bridge.
+- **Kernel memory mappings are released on stop/reload.** `cleanupZombieState` referred to `mappedMemoryMDL` before it was declared, so it was always nil and `map_memory` mappings were never unmapped.
+
 ## 12.1.0 — 2026-11-04
 
 Covers [#1](https://github.com/fhjordskhkjel/cheatengine-mcp-bridge/pull/1), [#2](https://github.com/fhjordskhkjel/cheatengine-mcp-bridge/pull/2) and the security / error-code / housekeeping changes that followed.

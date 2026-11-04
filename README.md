@@ -109,6 +109,15 @@ pip install mcp pywin32
 dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
 ```
 
+`ce_mcp_bridge.lua` is a loader for the modules in `MCP_Server/bridge/`, so keep the `MCP_Server` folder together. If your CE build runs the script without knowing its file name, the bridge stops with a message asking you to set the folder first:
+
+```lua
+CE_MCP_BRIDGE_DIR = [[C:\path\to\cheatengine-mcp-bridge\MCP_Server]]
+dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
+```
+
+Re-executing the script is safe: it stops the running bridge first, including its worker thread, breakpoints and DBVM watches.
+
 Look for: `[MCP v12.1.0] MCP Server Listening on: CE_MCP_Bridge_v99`
 
 ### 2. Configure MCP Client
@@ -289,9 +298,9 @@ And many more at `AI_Context/MCP_Bridge_Command_Reference.md`
 
 ## Troubleshooting
 
-### Cheat Engine says "too many local variables"
+### Cheat Engine says "too many local variables" or "Cannot find the bridge modules"
 
-Load the bridge from disk with `dofile(...)` instead of pasting the full script into a cheat table script. The bridge also declares command handlers as global functions intentionally; this avoids Cheat Engine's Lua chunk limit of 200 local variables when the complete bridge is compiled at once.
+The bridge is split into modules under `MCP_Server/bridge/`, each compiled separately, so the 200-local limit no longer applies to the whole bridge. Load `ce_mcp_bridge.lua` from disk with `dofile(...)` rather than pasting it into a cheat table script, keep the `bridge/` folder next to it, and if CE still cannot find it set `CE_MCP_BRIDGE_DIR` as shown in [Quick Start](#1-load-bridge-in-cheat-engine).
 
 ### MCP client cannot connect
 
@@ -375,7 +384,8 @@ CLAUDE.md / AGENTS.md                   # Agent guidance (Claude Code / Codex; k
 
 MCP_Server/
 ├── mcp_cheatengine.py                  # Python MCP server (FastMCP)
-├── ce_mcp_bridge.lua                   # Cheat Engine Lua bridge
+├── ce_mcp_bridge.lua                   # Cheat Engine bridge loader (load this in CE)
+├── bridge/                             # The bridge: 26 modules (core, codec, tool areas, dispatcher)
 ├── ce_tcp_relay.py                     # Optional TCP-to-named-pipe relay (WSL, containers, other hosts)
 ├── requirements*.txt                   # Runtime, TCP-only and dev/test dependencies
 ├── test_mcp.py                         # Live integration test (needs CE)
