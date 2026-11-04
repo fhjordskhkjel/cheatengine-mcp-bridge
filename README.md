@@ -6,7 +6,7 @@
 
 Create mods, trainers, security audits, game bots, accelerate RE, or do anything else with any program and game in a fraction of a time.
 
-[![Version](https://img.shields.io/badge/version-12.0.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
+[![Version](https://img.shields.io/badge/version-12.1.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
 
 > [!NOTE]
 > Thanks everyone for the stars, much appreciated! <3
@@ -109,7 +109,7 @@ pip install mcp pywin32
 dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
 ```
 
-Look for: `[MCP v12.0.0] MCP Server Listening on: CE_MCP_Bridge_v99`
+Look for: `[MCP v12.1.0] MCP Server Listening on: CE_MCP_Bridge_v99`
 
 ### 2. Configure MCP Client
 Add to your MCP configuration (e.g., `mcp_config.json`):
@@ -182,7 +182,7 @@ Set `--host` on the relay and `CE_MCP_HOST` on the MCP server to addresses that 
 ### 3. Verify Connection
 Use the `ping` tool to verify connectivity:
 ```json
-{"success": true, "version": "12.0.0", "message": "CE MCP Bridge Active"}
+{"success": true, "version": "12.1.0", "message": "CE MCP Bridge Active"}
 ```
 
 ### 4. Start Asking Questions
@@ -194,7 +194,7 @@ Use the `ping` tool to verify connectivity:
 
 ---
 
-## ~180 MCP Tools Available
+## 176 MCP Tools Available
 
 ### Memory
 | Tool | Description |
@@ -369,19 +369,25 @@ AI: "0x00=vtable, 0x08=itemCount(int), 0x10=itemArray(ptr)..."
 ## Project Structure
 
 ```
-CLAUDE.md                               # Claude Code agent guidance (this repo)
 README.md                               # User-facing documentation
+CHANGELOG.md                            # Release notes
+CLAUDE.md / AGENTS.md                   # Agent guidance (Claude Code / Codex; kept identical)
 
 MCP_Server/
-├── mcp_cheatengine.py                  # Python MCP Server (FastMCP)
-├── ce_mcp_bridge.lua                   # Cheat Engine Lua Bridge
-└── test_mcp.py                         # Test Suite
+├── mcp_cheatengine.py                  # Python MCP server (FastMCP)
+├── ce_mcp_bridge.lua                   # Cheat Engine Lua bridge
+├── ce_tcp_relay.py                     # Optional TCP-to-named-pipe relay (WSL, containers, other hosts)
+├── requirements*.txt                   # Runtime, TCP-only and dev/test dependencies
+├── test_mcp.py                         # Live integration test (needs CE)
+├── test_json_codec.lua                 # Offline Lua tests: wire codec
+├── test_pointer_parse.lua              # Offline Lua tests: pointer operand parser
+└── tests/                              # Offline pytest suite (no CE needed)
 
 AI_Context/
-├── BATCH_WORKER_BRIEFING.md            # Parallel-worker task specifications (v12 overhaul)
-├── MCP_Bridge_Command_Reference.md     # MCP Commands reference
-├── CE_LUA_Documentation.md             # Full CheatEngine 7.6 official documentation
-└── AI_Guide_MCP_Server_Implementation.md  # Full technical documentation for AI agent
+├── MCP_Bridge_Command_Reference.md     # Per-command reference
+├── AI_Guide_MCP_Server_Implementation.md  # Architecture and safety notes
+├── CE_LUA_Documentation.md             # Cheat Engine 7.6 Lua API reference
+└── Pointer_Tools_*.md                  # Design + plan for the pointer walk-back tools
 ```
 
 ---

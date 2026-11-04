@@ -1,9 +1,9 @@
 -- ============================================================================
--- CHEATENGINE MCP BRIDGE v12.0.0
+-- CHEATENGINE MCP BRIDGE v12.1.0
 -- ============================================================================
 
 local PIPE_NAME = "CE_MCP_Bridge_v99"
-local VERSION = "12.0.0"
+local VERSION = "12.1.0"
 
 -- Global State
 local serverState = {

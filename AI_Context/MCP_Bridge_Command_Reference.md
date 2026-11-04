@@ -1,10 +1,10 @@
-# MCP Bridge Command Reference (v12.0.0)
+# MCP Bridge Command Reference (v12.1.0)
 
 > **For AI Agents**: This document describes all available commands in the Cheat Engine MCP Bridge. Use these commands to perform memory analysis, reverse engineering, and dynamic tracing on target processes.
 >
 > **Architecture Support**: All commands automatically adapt to 32-bit or 64-bit targets. Pointer operations use `readPointer()` for automatic size handling.
 >
-> **Version**: This reference covers the full v12 tool surface (~180 tools) after all 26 implementation units land.
+> **Version**: This reference covers the v12.1 tool surface (176 tools). Every failure carries an `error_code` from the enum in `CLAUDE.md`; see `CHANGELOG.md` for what changed in 12.1.0.
 
 ---
 
@@ -65,7 +65,7 @@
 
 **Example response:**
 ```json
-{"success": true, "version": "12.0.0", "timestamp": 1733540000, "message": "CE MCP Bridge alive"}
+{"success": true, "version": "12.1.0", "timestamp": 1733540000, "message": "CE MCP Bridge alive"}
 ```
 
 **Usage**: Call this first to verify connectivity before performing operations.

@@ -16,7 +16,7 @@ jobs:
       matrix:
         python: ["3.10", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Lua 5.3 / 5.4
         run: sudo apt-get update && sudo apt-get install -y lua5.3 lua5.4
@@ -29,7 +29,7 @@ jobs:
           done
           luac5.3 -p MCP_Server/ce_mcp_bridge.lua
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
 
@@ -46,9 +46,9 @@ jobs:
     name: Windows (named pipe + stdio)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 

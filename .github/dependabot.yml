@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Keeps the workflow's actions current (e.g. away from deprecated Node runtimes).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # MCP_Server/requirements*.txt. The mcp<2 pin is deliberate (2.x removes
+  # mcp.server.fastmcp); Dependabot will still surface 1.x updates.
+  - package-ecosystem: pip
+    directory: /MCP_Server
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: mcp
+        update-types: ["version-update:semver-major"]

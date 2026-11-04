@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-A three-tier bridge that lets AI agents (via MCP) drive Cheat Engine to inspect and manipulate a running Windows process. See `README.md` for user-facing docs. Current wire/app version: `12.0.0`. After the v12 overhaul the bridge exposes **~180 MCP tools** covering memory, process lifecycle, code injection, symbol management, assembly/compilation, GUI automation, input, cheat tables, and kernel-mode operations.
+A three-tier bridge that lets AI agents (via MCP) drive Cheat Engine to inspect and manipulate a running Windows process. See `README.md` for user-facing docs. Current wire/app version: `12.1.0` (see `CHANGELOG.md`). The bridge exposes **176 MCP tools** covering memory, process lifecycle, code injection, symbol management, assembly/compilation, GUI automation, input, cheat tables, and kernel-mode operations.
 
 ## Commands
 
@@ -20,7 +20,7 @@ python -m pytest
 python MCP_Server/test_mcp.py
 ```
 
-Loading the Lua side in Cheat Engine: `File -> Execute Script -> open MCP_Server/ce_mcp_bridge.lua -> Execute`. Some CE builds expose this through `Table -> Show Cheat Table Lua Script`; in that case execute `dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])` instead of pasting the full bridge. Success log: `[MCP v12.0.0] MCP Server Listening on: CE_MCP_Bridge_v99`. Re-executing the script auto-calls `StopMCPBridge` / `cleanupZombieState` first, so reloading is safe.
+Loading the Lua side in Cheat Engine: `File -> Execute Script -> open MCP_Server/ce_mcp_bridge.lua -> Execute`. Some CE builds expose this through `Table -> Show Cheat Table Lua Script`; in that case execute `dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])` instead of pasting the full bridge. Success log: `[MCP v12.1.0] MCP Server Listening on: CE_MCP_Bridge_v99`. Re-executing the script auto-calls `StopMCPBridge` / `cleanupZombieState` first, so reloading is safe.
 
 There is **no build step and no linter**. The offline suite in `MCP_Server/tests/` needs no CE: it loads the whole bridge into Lua 5.3 via `lupa` with stubbed CE APIs (`tests/ce_stub.lua`) to exercise handlers and pipe framing, drives the Python client and TCP relay against fake bridges, runs the MCP server over real stdio, and checks Python/Lua drift (command names, pipe name, frame limit, duplicate locals, this file vs `AGENTS.md`). The standalone Lua tests (`test_json_codec.lua`, `test_pointer_parse.lua`) also run under plain `lua5.3`/`lua5.4`. `.github/workflows/offline-tests.yml` runs all of it, plus real named-pipe tests on Windows. `test_mcp.py` is the separate end-to-end script that talks to the live Named Pipe; running a "single test" means editing the `all_tests` dict in `test_mcp.py:main` or commenting out sections.
 
@@ -77,7 +77,7 @@ Two files are the source of truth — there's no codegen, so you must edit both:
 
 - **Windows only.** Named Pipe access via `pywin32`; no plans for cross-platform.
 - **Cheat Engine prerequisite**: CE → Settings → Extra → **disable "Query memory region routines"**. With it enabled, memory scans on DBVM-protected pages trigger `CLOCK_WATCHDOG_TIMEOUT` BSODs. This is documented as a hard requirement in both `README.md` and `AI_Context/AI_Guide_MCP_Server_Implementation.md`; don't weaken the assumption without testing.
-- **Pipe name** `\\.\pipe\CE_MCP_Bridge_v99` is hardcoded in both `mcp_cheatengine.py` (as `PIPE_NAME`) and `ce_mcp_bridge.lua` (as `PIPE_NAME`). Keep them in sync if you ever rename it. The `_v99` suffix is the wire-protocol version and is independent of the bridge version (`12.0.0`).
+- **Pipe name** `\\.\pipe\CE_MCP_Bridge_v99` is hardcoded in both `mcp_cheatengine.py` (as `PIPE_NAME`) and `ce_mcp_bridge.lua` (as `PIPE_NAME`). Keep them in sync if you ever rename it. The `_v99` suffix is the wire-protocol version and is independent of the bridge version (`12.1.0`).
 - **Codex config:** use TOML, not JSON. Add `[mcp_servers.cheatengine]`, `command = "python"`, and `args = ['C:\path\to\MCP_Server\mcp_cheatengine.py']`. Use TOML single-quoted strings for Windows paths so backslashes are literal, then restart Codex and verify with the `ping` tool.
 - **Anti-cheat safety** (per `AI_Context/AI_Guide_MCP_Server_Implementation.md`): prefer hardware DR0–DR3 breakpoints over software (`0xCC`) breakpoints, and prefer DBVM watches for truly invisible tracing. The existing `cmd_set_breakpoint` already uses `debug_setBreakpoint` (hardware); keep new debugging tools on that path.
 - **Env vars:** `CE_MCP_TIMEOUT` (default 30s; `<=0` disables) limits per-tool latency, and timed-out commands are never retried; `CE_MCP_TOOLSETS` (comma-separated toolsets, default `all`) limits which tools are registered; `CE_MCP_PROFILE` (`readonly` / `standard` / `full`, default `full`) limits tools by access class; `CE_MCP_AUDIT_LOG=<path>` writes a JSON-lines audit log; `CE_MCP_ALLOW_SHELL=1` enables `run_command` / `shell_execute` (default: disabled) and must also be enabled on the CE side.
@@ -101,10 +101,11 @@ New handlers are appended with unit markers (e.g. `-- >>> BEGIN UNIT-NN <Title> 
 ### Pagination
 List-returning commands (scan results, memory regions, modules, threads, disassembly, references, BP hits) support `offset` / `limit` params with a standard `{ total, offset, limit, returned, <key>: [...] }` return shape.
 
+Release notes live in `CHANGELOG.md` at the repo root; add an entry (and bump `VERSION` in the bridge) for any client-visible change. A drift test checks the version string everywhere it appears.
+
 ## Reference material in `AI_Context/`
 
 - `MCP_Bridge_Command_Reference.md` — exhaustive per-command reference with request/response examples. Consult this when working on a specific tool instead of grepping the Lua file.
 - `AI_Guide_MCP_Server_Implementation.md` — higher-level architecture and safety notes (v12.0.0).
 - `CE_LUA_Documentation.md` — Cheat Engine 7.6 Lua API reference (~229 KB). Offline source of truth when a CE function's behavior is unclear.
-- `BATCH_WORKER_BRIEFING.md` — task specifications used during the v12 parallel overhaul. Useful historical context for understanding why sections are structured as they are.
-- `plugins/` — Cheat Engine native plugin SDK headers (`cepluginsdk.h/.pas`) and Lua 5.3 headers. **Not used** by the bridge at runtime; it's reference material for CE's C plugin API and unrelated to the Lua script used here.
+- `Pointer_Tools_Design.md` / `Pointer_Tools_Implementation_Plan.md` — design and plan for the UNIT-24 pointer walk-back tools (`analyze_pointer_access`, `validate_pointer_chains`).

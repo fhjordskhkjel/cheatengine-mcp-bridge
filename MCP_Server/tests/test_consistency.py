@@ -105,3 +105,20 @@ def test_every_lua_failure_has_an_error_code():
 def test_error_codes_are_from_the_enum():
     used = set(re.findall(r'error_code\s*=\s*"([A-Z_]+)"', LUA)) | set(re.findall(r'"error_code":\s*"([A-Z_]+)"', PY))
     assert used <= ERROR_CODES, f"error codes outside the CLAUDE.md enum: {sorted(used - ERROR_CODES)}"
+
+
+def test_version_matches_everywhere():
+    version = re.search(r'local VERSION = "(\d+\.\d+\.\d+)"', LUA).group(1)
+    assert f"CHEATENGINE MCP BRIDGE v{version}" in LUA
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    assert f"version-{version}-blue" in readme and f"[MCP v{version}]" in readme
+    assert f"Current wire/app version: `{version}`" in (REPO / "CLAUDE.md").read_text(encoding="utf-8")
+    ref = (REPO / "AI_Context" / "MCP_Bridge_Command_Reference.md").read_text(encoding="utf-8")
+    assert ref.startswith(f"# MCP Bridge Command Reference (v{version})")
+    assert f"## {version}" in (REPO / "CHANGELOG.md").read_text(encoding="utf-8"), "add a CHANGELOG.md entry"
+
+
+def test_documented_tool_count_matches():
+    count = len(re.findall(r'^@tool\(', PY, re.M))
+    assert f"## {count} MCP Tools Available" in (REPO / "README.md").read_text(encoding="utf-8")
+    assert f"**{count} MCP tools**" in (REPO / "CLAUDE.md").read_text(encoding="utf-8")
