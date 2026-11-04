@@ -27,10 +27,12 @@ def frame(body: bytes) -> bytes:
 class Bridge:
     """ce_mcp_bridge.lua loaded into Lua 5.3 (CE's version) with ce_stub.lua."""
 
-    def __init__(self):
+    def __init__(self, prelude=b""):
         lupa = pytest.importorskip("lupa")
         self.L = lupa.lua53.LuaRuntime(encoding=None)
         self.L.execute((HERE / "ce_stub.lua").read_bytes())
+        if prelude:
+            self.L.execute(prelude)  # runs before the bridge loads, like a CE user's setup
         # Windows checkouts may have CRLF line endings (core.autocrlf).
         src = BRIDGE_LUA.read_bytes().replace(b"\r\n", b"\n")
         hook = b"\n-- Auto-start\nStartMCPBridge()"

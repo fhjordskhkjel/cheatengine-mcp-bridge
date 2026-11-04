@@ -1,10 +1,10 @@
-# MCP Bridge Command Reference (v12.0.0)
+# MCP Bridge Command Reference (v12.1.0)
 
 > **For AI Agents**: This document describes all available commands in the Cheat Engine MCP Bridge. Use these commands to perform memory analysis, reverse engineering, and dynamic tracing on target processes.
 >
 > **Architecture Support**: All commands automatically adapt to 32-bit or 64-bit targets. Pointer operations use `readPointer()` for automatic size handling.
 >
-> **Version**: This reference covers the full v12 tool surface (~180 tools) after all 26 implementation units land.
+> **Version**: This reference covers the v12.1 tool surface (176 tools). Every failure carries an `error_code` from the enum in `CLAUDE.md`; see `CHANGELOG.md` for what changed in 12.1.0.
 
 ---
 
@@ -65,7 +65,7 @@
 
 **Example response:**
 ```json
-{"success": true, "version": "12.0.0", "timestamp": 1733540000, "message": "CE MCP Bridge alive"}
+{"success": true, "version": "12.1.0", "timestamp": 1733540000, "message": "CE MCP Bridge alive"}
 ```
 
 **Usage**: Call this first to verify connectivity before performing operations.
@@ -2845,19 +2845,18 @@ Capture errors inside the hit callback never leave the target suspended: the thr
 
 ### `run_command` *(Shell-gated)*
 
-**Purpose:** Execute a shell command and return its output.
+**Purpose:** Run a program via CE's `runCommand` and return its output.
 
 **Parameters:**
-- `command` (str, required): Command to execute.
-- `timeout_ms` (int, default=5000): Execution timeout.
+- `command` (str, required): Program path or name (e.g. `"cmd.exe"`).
+- `args` (str, default=`""`): Argument string.
 
 **Returns:** JSON with:
 - `success` (bool)
-- `stdout` (str): Standard output.
-- `stderr` (str): Standard error.
+- `output` (str): Captured output.
 - `exit_code` (int)
 
-> **Security**: Requires `CE_MCP_ALLOW_SHELL=1` environment variable. Returns an error if not enabled.
+> **Security** (access class `exec`): needs `CE_MCP_PROFILE=full`, `CE_MCP_ALLOW_SHELL=1` in the MCP server's environment, **and** the CE-side opt-in (`CE_MCP_ALLOW_SHELL=1` in Cheat Engine's environment, or `CE_MCP_ALLOW_SHELL = true` before loading the bridge). Otherwise returns `error_code: "PERMISSION_DENIED"`.
 
 ---
 
@@ -2866,15 +2865,16 @@ Capture errors inside the hit callback never leave the target suspended: the thr
 **Purpose:** Open a file, URL, or application using Windows ShellExecute.
 
 **Parameters:**
-- `path` (str, required): File path or URL.
-- `verb` (str, default=`"open"`): Shell verb (`"open"`, `"runas"`, `"print"`).
-- `args` (str, optional): Arguments to pass.
+- `command` (str, required): File path, program or URL.
+- `args` (str, default=`""`): Arguments to pass.
+- `verb` (str, default=`"open"`): Only `"open"` is supported; anything else returns `INVALID_PARAMS`.
+- `working_dir` (str, optional): Working directory.
+- `showcommand` (int, optional): `SW_*` show-window value.
 
 **Returns:** JSON with:
 - `success` (bool)
-- `path` (str)
 
-> **Security**: Requires `CE_MCP_ALLOW_SHELL=1` environment variable. Returns an error if not enabled.
+> **Security** (access class `exec`): same three opt-ins as `run_command`; otherwise returns `error_code: "PERMISSION_DENIED"`.
 
 ---
 
@@ -3220,7 +3220,10 @@ The MCP bridge Python server (`mcp_cheatengine.py`) reads the following environm
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `CE_MCP_TIMEOUT` | float (seconds) | 30 | Timeout in seconds for each bridge command round-trip. Set `<=0` to disable timeout enforcement. |
-| `CE_MCP_ALLOW_SHELL` | int (0 or 1) | 0 | Set to `1` to enable shell execution tools (`run_command`, `shell_execute`). **Disabled by default for security.** |
+| `CE_MCP_ALLOW_SHELL` | int (0 or 1) | 0 | Set to `1` to enable shell execution tools (`run_command`, `shell_execute`). **Disabled by default for security.** The bridge has its own CE-side opt-in as well (see `run_command`). |
+| `CE_MCP_PROFILE` | str | `full` | `readonly` (read + analysis tools only), `standard` (adds write tools), `full` (adds exec tools). Unknown values fail at startup. |
+| `CE_MCP_TOOLSETS` | str | `all` | Comma-separated tool groups to register (`process` is always on). |
+| `CE_MCP_AUDIT_LOG` | path | unset | Append one JSON line per command: `ts`, `method`, `params` (strings capped at 16 KB, lists at 256 items), `outcome` (`ok` / `failed` / `timeout` / `transport_error` / `blocked`), `success`, `error_code`, `error`, `duration_ms`. Best-effort: an unwritable file logs one warning to stderr and tools keep working. |
 
 **Setting environment variables:**
 
@@ -3283,7 +3286,8 @@ All commands return `success: false` with an `error` field on failure:
 | `"Response too large"` | Pipe response exceeded 16 MB limit. | Reduce `size` or `max` parameter. |
 | `"Pipe Communication failed"` | Named pipe connection lost. | Bridge auto-reconnects on next call. |
 | `"Invalid JSON received from CE"` | Corrupt pipe response. | Usually transient; retry the command. |
-| `"Shell execution disabled"` | `run_command` or `shell_execute` called without `CE_MCP_ALLOW_SHELL=1`. | Set environment variable to enable. |
+| `"Shell execution disabled"` | `run_command` or `shell_execute` called without `CE_MCP_ALLOW_SHELL=1` in the MCP server's environment. | Set it in the MCP client's server config and restart. |
+| `"Shell tools are disabled inside Cheat Engine"` | The CE-side opt-in is missing. | Set `CE_MCP_ALLOW_SHELL=1` in CE's environment or `CE_MCP_ALLOW_SHELL = true` before loading the bridge, then reload it. |
 | `"Process not opened"` | No process is attached to CE. | Use `open_process` or attach via CE GUI. |
 | `"Symbol not found"` | Symbol name could not be resolved. | Verify module is loaded with `enum_modules`. |
 | `"Timeout"` | Operation exceeded `CE_MCP_TIMEOUT`. | Increase timeout or reduce operation scope. |

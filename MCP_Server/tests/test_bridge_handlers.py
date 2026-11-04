@@ -93,3 +93,33 @@ def test_process_guard_has_error_code(bridge):
 def test_sanitize_filename_shared(bridge):
     assert "traversal" in bridge.result("md5_file", filename="..\\x")["error"]
     assert bridge.result("md5_file", filename="")["success"] is False
+
+
+def test_shell_tools_denied_inside_ce_by_default(bridge):
+    for method in ("run_command", "shell_execute"):
+        r = bridge.result(method, command="cmd.exe")
+        assert r["success"] is False and r["error_code"] == "PERMISSION_DENIED"
+        assert "CE_MCP_ALLOW_SHELL" in r["error"]
+
+
+def test_shell_opt_in_is_captured_at_load_time():
+    from conftest import Bridge
+    enabled = Bridge(prelude=b"CE_MCP_ALLOW_SHELL = true\nfunction runCommand(c, a) return 'out:' .. c, 0 end")
+    assert enabled.result("run_command", command="whoami") == {"success": True, "output": "out:whoami", "exit_code": 0}
+
+    via_env = Bridge(prelude=b"CE_ENV.CE_MCP_ALLOW_SHELL = '1'\nfunction runCommand(c, a) return 'env', 0 end")
+    assert via_env.result("run_command", command="x")["success"] is True
+
+    late = Bridge(prelude=b"function runCommand(c, a) return 'out', 0 end")
+    late.result("evaluate_lua", code="CE_MCP_ALLOW_SHELL = true")  # flipping the global after load...
+    assert late.result("run_command", command="whoami")["error_code"] == "PERMISSION_DENIED"  # ...does nothing
+
+
+def test_error_codes_on_common_failures(bridge):
+    assert bridge.result("read_integer", address="zz")["error_code"] == "INVALID_ADDRESS"
+    bridge.G[b"MEM"][b"i" + str(0x9000).encode()] = None
+    assert bridge.result("read_integer", address="0x9000", type="dword")["error_code"] == "INVALID_ADDRESS"
+    assert bridge.result("read_integer", address="0x9000", type="nibble")["error_code"] == "INVALID_PARAMS"
+    assert bridge.result("remove_breakpoint", id="nope")["error_code"] == "NOT_FOUND"
+    assert bridge.result("md5_file", filename="..\\x")["error_code"] == "INVALID_PARAMS"
+    assert bridge.result("evaluate_lua", code="return (")["error_code"] == "INVALID_PARAMS"

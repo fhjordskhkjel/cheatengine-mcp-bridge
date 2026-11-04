@@ -50,8 +50,11 @@ def test_frame_limit_matches():
 
 
 def test_every_tool_is_in_a_toolset():
-    assert not re.search(r"^@mcp\.tool\(", PY, re.M), "register tools with @tool(\"<toolset>\"), not @mcp.tool()"
-    assert len(re.findall(r'^@tool\("\w+"\)$', PY, re.M)) >= 176
+    assert not re.search(r"^@mcp\.tool\(", PY, re.M), "register tools with @tool(\"<toolset>\", \"<access>\"), not @mcp.tool()"
+    decorators = re.findall(r"^@tool\(.*\)$", PY, re.M)
+    well_formed = [d for d in decorators if re.fullmatch(r'@tool\("\w+", "(read|analysis|write|exec)"\)', d)]
+    assert len(decorators) >= 176 and decorators == well_formed, \
+        "every tool needs @tool(\"<toolset>\", \"<access>\") with a literal access class"
 
 
 def test_claude_md_and_agents_md_in_sync():
@@ -59,3 +62,63 @@ def test_claude_md_and_agents_md_in_sync():
     claude = (REPO / "CLAUDE.md").read_text(encoding="utf-8").splitlines()
     agents = (REPO / "AGENTS.md").read_text(encoding="utf-8").splitlines()
     assert claude[3:] == agents[3:], "CLAUDE.md and AGENTS.md diverged; apply the same edit to both"
+
+
+ERROR_CODES = {"NO_PROCESS", "INVALID_ADDRESS", "INVALID_PARAMS", "CE_API_UNAVAILABLE", "DBVM_NOT_LOADED",
+               "DBK_NOT_LOADED", "PERMISSION_DENIED", "NOT_FOUND", "OUT_OF_RESOURCES", "INTERNAL_ERROR"}
+
+
+def _failure_tables(src):
+    """Yield (line, text) for each Lua table constructor containing `success = false`."""
+    for m in re.finditer(r"success\s*=\s*false", src):
+        depth, i = 0, m.start()
+        while i > 0:  # back to the enclosing '{'
+            i -= 1
+            if src[i] == "}":
+                depth += 1
+            elif src[i] == "{":
+                if depth == 0:
+                    break
+                depth -= 1
+        depth, j = 0, i
+        while j < len(src):  # forward to its '}', skipping string literals
+            c = src[j]
+            if c in "\"'":
+                j += 1
+                while j < len(src) and src[j] != c:
+                    j += 2 if src[j] == "\\" else 1
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        yield src.count("\n", 0, i) + 1, src[i:j + 1]
+
+
+def test_every_lua_failure_has_an_error_code():
+    bare = [line for line, table in _failure_tables(LUA) if "error_code" not in table]
+    assert not bare, f"success = false without error_code at ce_mcp_bridge.lua lines {bare}"
+
+
+def test_error_codes_are_from_the_enum():
+    used = set(re.findall(r'error_code\s*=\s*"([A-Z_]+)"', LUA)) | set(re.findall(r'"error_code":\s*"([A-Z_]+)"', PY))
+    assert used <= ERROR_CODES, f"error codes outside the CLAUDE.md enum: {sorted(used - ERROR_CODES)}"
+
+
+def test_version_matches_everywhere():
+    version = re.search(r'local VERSION = "(\d+\.\d+\.\d+)"', LUA).group(1)
+    assert f"CHEATENGINE MCP BRIDGE v{version}" in LUA
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    assert f"version-{version}-blue" in readme and f"[MCP v{version}]" in readme
+    assert f"Current wire/app version: `{version}`" in (REPO / "CLAUDE.md").read_text(encoding="utf-8")
+    ref = (REPO / "AI_Context" / "MCP_Bridge_Command_Reference.md").read_text(encoding="utf-8")
+    assert ref.startswith(f"# MCP Bridge Command Reference (v{version})")
+    assert f"## {version}" in (REPO / "CHANGELOG.md").read_text(encoding="utf-8"), "add a CHANGELOG.md entry"
+
+
+def test_documented_tool_count_matches():
+    count = len(re.findall(r'^@tool\(', PY, re.M))
+    assert f"## {count} MCP Tools Available" in (REPO / "README.md").read_text(encoding="utf-8")
+    assert f"**{count} MCP tools**" in (REPO / "CLAUDE.md").read_text(encoding="utf-8")

@@ -6,7 +6,7 @@
 
 Create mods, trainers, security audits, game bots, accelerate RE, or do anything else with any program and game in a fraction of a time.
 
-[![Version](https://img.shields.io/badge/version-12.0.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
+[![Version](https://img.shields.io/badge/version-12.1.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
 
 > [!NOTE]
 > Thanks everyone for the stars, much appreciated! <3
@@ -109,7 +109,7 @@ pip install mcp pywin32
 dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
 ```
 
-Look for: `[MCP v12.0.0] MCP Server Listening on: CE_MCP_Bridge_v99`
+Look for: `[MCP v12.1.0] MCP Server Listening on: CE_MCP_Bridge_v99`
 
 ### 2. Configure MCP Client
 Add to your MCP configuration (e.g., `mcp_config.json`):
@@ -182,7 +182,7 @@ Set `--host` on the relay and `CE_MCP_HOST` on the MCP server to addresses that 
 ### 3. Verify Connection
 Use the `ping` tool to verify connectivity:
 ```json
-{"success": true, "version": "12.0.0", "message": "CE MCP Bridge Active"}
+{"success": true, "version": "12.1.0", "message": "CE MCP Bridge Active"}
 ```
 
 ### 4. Start Asking Questions
@@ -194,7 +194,7 @@ Use the `ping` tool to verify connectivity:
 
 ---
 
-## ~180 MCP Tools Available
+## 176 MCP Tools Available
 
 ### Memory
 | Tool | Description |
@@ -305,12 +305,44 @@ Check these in order:
 
 ---
 
+## Security Model
+
+The agent drives a debugger with kernel access, so decide up front how much it may do.
+
+**Profiles.** Every tool declares one access class, and `CE_MCP_PROFILE` registers only the classes you allow:
+
+| Class | What it may change | `readonly` | `standard` | `full` |
+|-------|--------------------|:---:|:---:|:---:|
+| `read` | Nothing | ✅ | ✅ | ✅ |
+| `analysis` | Only CE's own analysis state: attached process, scan sessions, structures, registered symbols | ✅ | ✅ | ✅ |
+| `write` | The target (memory, protection, allocations, threads, breakpoints, debugger, DBVM/DBK) or the host (files, clipboard, input, windows) | | ✅ | ✅ |
+| `exec` | Anything: Lua, auto-assembler, compilers, DLL/.NET injection, remote execution, shell, loading cheat tables | | | ✅ |
+
+`readonly` is the safe default for pure reverse engineering: no writes, no breakpoints or debugger attach, no code execution. The default is `full` for backward compatibility. The `list_toolsets` tool shows the active profile and why each tool is or isn't registered.
+
+**Annotations.** Each tool carries MCP annotations derived from its class (`readOnlyHint` for `read`, `destructiveHint` for `write`/`exec`, `openWorldHint` for `exec`), so clients that support them can auto-approve reads and ask before anything else.
+
+**Shell tools need two opt-ins.** `CE_MCP_ALLOW_SHELL=1` in the MCP server's environment, *and* on the Cheat Engine side either `CE_MCP_ALLOW_SHELL=1` in CE's environment or this before loading the bridge:
+
+```lua
+CE_MCP_ALLOW_SHELL = true
+dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
+```
+
+Cheat Engine usually runs elevated, so a shell command started by the bridge runs with CE's privileges; the CE-side check is captured at load time and cannot be switched on over the pipe. The CE console logs whether shell tools are enabled when the bridge starts.
+
+**What profiles do not do.** Profiles control what the MCP server exposes; they are not a sandbox inside Cheat Engine. Any process that can open the named pipe can send any command except the shell tools, and in `full`, `evaluate_lua` can do anything CE can. Use `readonly` or `standard` when you don't need code execution, and `CE_MCP_AUDIT_LOG` to keep a record of what was done.
+
+---
+
 ## Environment Variables
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CE_MCP_TIMEOUT` | `30` | Timeout (seconds) for each MCP tool call; `<=0` disables it. A timed-out command is not retried and may still be running in Cheat Engine, so raise this for long scans. |
-| `CE_MCP_ALLOW_SHELL` | *unset* | Set to `1` to enable `run_command` / `shell_execute` tools. **Arbitrary code execution risk** — leave unset by default. |
+| `CE_MCP_PROFILE` | `full` | Which access classes get registered: `readonly` (passive: reads, scans, disassembly, structures, symbols; never touches the target or the host), `standard` (adds memory writes, breakpoints, debugger control, files, input), `full` (adds arbitrary code execution: Lua, auto-assembler, injection, shell). See [Security Model](#security-model). |
+| `CE_MCP_ALLOW_SHELL` | *unset* | Set to `1` to enable `run_command` / `shell_execute`. **Arbitrary code execution risk.** Needs the CE-side opt-in too, and `CE_MCP_PROFILE=full`. |
+| `CE_MCP_AUDIT_LOG` | *unset* | Path of a JSON-lines file that records every command sent to Cheat Engine (time, method, parameters, outcome, error code, duration). |
 | `CE_MCP_TOOLSETS` | `all` | Comma-separated tool groups to register: `process` (always on), `memory`, `scan`, `analysis`, `debug`, `kernel`, `scripting`, `table`, `gui`, `system`. All 176 tool schemas cost a lot of context on every turn; e.g. `memory,scan,analysis,debug` keeps the reverse-engineering core (~100 tools). The `list_toolsets` tool shows what each group contains and what is disabled. |
 
 ---
@@ -337,26 +369,38 @@ AI: "0x00=vtable, 0x08=itemCount(int), 0x10=itemArray(ptr)..."
 ## Project Structure
 
 ```
-CLAUDE.md                               # Claude Code agent guidance (this repo)
 README.md                               # User-facing documentation
+CHANGELOG.md                            # Release notes
+CLAUDE.md / AGENTS.md                   # Agent guidance (Claude Code / Codex; kept identical)
 
 MCP_Server/
-├── mcp_cheatengine.py                  # Python MCP Server (FastMCP)
-├── ce_mcp_bridge.lua                   # Cheat Engine Lua Bridge
-└── test_mcp.py                         # Test Suite
+├── mcp_cheatengine.py                  # Python MCP server (FastMCP)
+├── ce_mcp_bridge.lua                   # Cheat Engine Lua bridge
+├── ce_tcp_relay.py                     # Optional TCP-to-named-pipe relay (WSL, containers, other hosts)
+├── requirements*.txt                   # Runtime, TCP-only and dev/test dependencies
+├── test_mcp.py                         # Live integration test (needs CE)
+├── test_json_codec.lua                 # Offline Lua tests: wire codec
+├── test_pointer_parse.lua              # Offline Lua tests: pointer operand parser
+└── tests/                              # Offline pytest suite (no CE needed)
 
 AI_Context/
-├── BATCH_WORKER_BRIEFING.md            # Parallel-worker task specifications (v12 overhaul)
-├── MCP_Bridge_Command_Reference.md     # MCP Commands reference
-├── CE_LUA_Documentation.md             # Full CheatEngine 7.6 official documentation
-└── AI_Guide_MCP_Server_Implementation.md  # Full technical documentation for AI agent
+├── MCP_Bridge_Command_Reference.md     # Per-command reference
+├── AI_Guide_MCP_Server_Implementation.md  # Architecture and safety notes
+├── CE_LUA_Documentation.md             # Cheat Engine 7.6 Lua API reference
+└── Pointer_Tools_*.md                  # Design + plan for the pointer walk-back tools
 ```
 
 ---
 
 ## Testing
 
-Running the test:
+**Offline suite** (no Cheat Engine needed; runs in CI on Linux and Windows):
+```bash
+pip install -r MCP_Server/requirements-dev.txt
+python -m pytest
+```
+
+**Live integration test** (Cheat Engine running, bridge loaded, a process attached):
 ```bash
 python MCP_Server/test_mcp.py
 ```

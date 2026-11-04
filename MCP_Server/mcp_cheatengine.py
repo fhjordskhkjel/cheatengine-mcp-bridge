@@ -106,6 +106,7 @@ try:
     import anyio
     import anyio.to_thread
     from mcp.server.fastmcp import FastMCP
+    from mcp.types import ToolAnnotations
     
     # CRITICAL: Also patch the reference inside the fastmcp module
     # FastMCP already imported stdio_server before our patch, so we need to update its reference too
@@ -209,6 +210,79 @@ CE_MCP_HOST = os.environ.get("CE_MCP_HOST", DEFAULT_TCP_HOST).strip() or DEFAULT
 CE_MCP_PORT = _parse_tcp_port(os.environ.get("CE_MCP_PORT"))
 
 # ============================================================================
+# AUDIT LOG
+# ============================================================================
+# CE_MCP_AUDIT_LOG=<path> appends one JSON object per command to <path>: what
+# was asked of Cheat Engine, when, how long it took and how it ended. It is
+# the record of exactly what an agent did to the target (every write,
+# injection and breakpoint), and it shows whether a command that timed out
+# ran once. Writing is best-effort: if the file cannot be written, a warning
+# goes to stderr once and tools keep working.
+
+_AUDIT_MAX_STRING = 16 * 1024  # long enough to keep whole Lua / assembler scripts
+_AUDIT_MAX_ITEMS = 256         # e.g. write_memory byte lists
+
+
+def _audit_value(value, depth=0):
+    """Copy a value for the audit log, bounding its size."""
+    if isinstance(value, str):
+        if len(value) > _AUDIT_MAX_STRING:
+            return value[:_AUDIT_MAX_STRING] + f"...[+{len(value) - _AUDIT_MAX_STRING} chars]"
+        return value
+    if depth >= 6:
+        return repr(value)[:200]
+    if isinstance(value, dict):
+        return {str(k): _audit_value(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        items = [_audit_value(v, depth + 1) for v in value[:_AUDIT_MAX_ITEMS]]
+        if len(value) > _AUDIT_MAX_ITEMS:
+            items.append(f"...[+{len(value) - _AUDIT_MAX_ITEMS} items]")
+        return items
+    return value
+
+
+class AuditLog:
+    def __init__(self, path):
+        self.path = path
+        self._lock = threading.Lock()
+        self._fh = None
+        self._warned = False
+
+    def write(self, record):
+        line = json.dumps(record, ensure_ascii=False, default=str)
+        with self._lock:
+            try:
+                if self._fh is None:
+                    self._fh = open(self.path, "a", encoding="utf-8", buffering=1)
+                self._fh.write(line + "\n")
+            except OSError as exc:
+                if not self._warned:
+                    self._warned = True
+                    debug_log(f"Audit log {self.path!r} not writable ({exc}); continuing without it.")
+
+    def record(self, method, params, outcome, started, result=None, error=None):
+        now = time.time()
+        entry = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{int(now * 1000) % 1000:03d}Z",
+            "method": method,
+            "params": _audit_value(params or {}),
+            "outcome": outcome,
+            "duration_ms": round((time.monotonic() - started) * 1000, 1),
+        }
+        if isinstance(result, dict):
+            entry["success"] = result.get("success")
+            if result.get("success") is False:
+                entry["error_code"] = result.get("error_code")
+                entry["error"] = _audit_value(str(result.get("error", "")))
+        if error is not None:
+            entry["error"] = _audit_value(str(error))
+        self.write(entry)
+
+
+_audit_path = os.environ.get("CE_MCP_AUDIT_LOG", "").strip()
+AUDIT_LOG = AuditLog(_audit_path) if _audit_path else None
+
+# ============================================================================
 # BRIDGE CLIENTS
 # ============================================================================
 
@@ -256,6 +330,7 @@ class CEBridgeClient:
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
         self.last_connect_error = None
+        self.audit = AUDIT_LOG
 
     # -- transport hooks -------------------------------------------------
     def _open(self):
@@ -380,7 +455,24 @@ class CEBridgeClient:
 
         Raises ConnectionError / TimeoutError on transport failure; JSON-RPC
         errors come back as {"success": False, "error", "error_code"}.
+        Every call is recorded in the audit log when CE_MCP_AUDIT_LOG is set.
         """
+        if self.audit is None:
+            return self._send_command_serialised(method, params)
+        started = time.monotonic()
+        try:
+            result = self._send_command_serialised(method, params)
+        except TimeoutError as exc:
+            self.audit.record(method, params, "timeout", started, error=exc)
+            raise
+        except Exception as exc:
+            self.audit.record(method, params, "transport_error", started, error=exc)
+            raise
+        failed = isinstance(result, dict) and result.get("success") is False
+        self.audit.record(method, params, "failed" if failed else "ok", started, result=result)
+        return result
+
+    def _send_command_serialised(self, method, params):
         # Tools run in worker threads, so calls can arrive concurrently; CE has
         # one pipe, so they are serialised here. A call queued behind a slow
         # one gives up after CE_MCP_TIMEOUT rather than waiting forever.
@@ -700,6 +792,45 @@ def _parse_toolsets(raw_value):
 ENABLED_TOOLSETS = _parse_toolsets(os.environ.get("CE_MCP_TOOLSETS"))
 TOOL_TOOLSET = {}  # tool name -> toolset, for every defined tool (enabled or not)
 
+# Every tool also declares what it can change. The class drives both the MCP
+# tool annotations (so clients can auto-approve reads and prompt on the rest)
+# and CE_MCP_PROFILE (which classes get registered at all).
+ACCESS_CLASSES = {
+    "read":     "Pure read of the target, CE or the host; changes nothing.",
+    "analysis": "Changes only CE's own analysis state (attached process, scan sessions, "
+                "structures, registered symbols, hit buffers); never the target or the host.",
+    "write":    "Modifies the target (memory, protection, allocations, threads, debugger and "
+                "breakpoint state, DBVM/DBK state) or the host (files, clipboard, input, windows, "
+                "sounds, dialogs).",
+    "exec":     "Runs arbitrary code or loads programs/modules: Lua, the auto-assembler, "
+                "compilers, injection, remote execution, the shell, cheat tables (which can "
+                "carry scripts).",
+}
+PROFILES = {
+    "readonly": ("read", "analysis"),           # passive: never touches the target or the host
+    "standard": ("read", "analysis", "write"),  # everything except arbitrary code execution
+    "full":     ("read", "analysis", "write", "exec"),
+}
+_ACCESS_ANNOTATIONS = {
+    "read":     ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False),
+    "analysis": ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False),
+    "write":    ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False),
+    "exec":     ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True),
+}
+
+
+def _parse_profile(raw_value):
+    """Parse CE_MCP_PROFILE; defaults to 'full' (every access class)."""
+    profile = (raw_value or "full").strip().lower() or "full"
+    if profile not in PROFILES:
+        raise ValueError(f"CE_MCP_PROFILE must be one of: {', '.join(PROFILES)} (got {raw_value!r}).")
+    return profile
+
+
+CE_MCP_PROFILE = _parse_profile(os.environ.get("CE_MCP_PROFILE"))
+ALLOWED_ACCESS = set(PROFILES[CE_MCP_PROFILE])
+TOOL_ACCESS = {}  # tool name -> access class, for every defined tool
+
 
 def _run_off_event_loop(fn):
     """Wrap a blocking tool so it runs in a worker thread.
@@ -714,23 +845,41 @@ def _run_off_event_loop(fn):
     return wrapper
 
 
-def tool(toolset):
-    """Register an MCP tool in a toolset (replaces a bare @mcp.tool())."""
+def tool(toolset, access):
+    """Register an MCP tool (replaces a bare @mcp.tool()).
+
+    toolset: one of TOOLSETS. access: one of ACCESS_CLASSES; it sets the MCP
+    annotations and decides whether CE_MCP_PROFILE registers the tool.
+    """
     if toolset not in TOOLSETS:
         raise ValueError(f"unknown toolset {toolset!r}")
+    if access not in ACCESS_CLASSES:
+        raise ValueError(f"unknown access class {access!r}")
 
     def decorator(fn):
         TOOL_TOOLSET[fn.__name__] = toolset
-        if toolset in ENABLED_TOOLSETS:
-            mcp.tool()(_run_off_event_loop(fn))
+        TOOL_ACCESS[fn.__name__] = access
+        if toolset in ENABLED_TOOLSETS and access in ALLOWED_ACCESS:
+            mcp.tool(annotations=_ACCESS_ANNOTATIONS[access])(_run_off_event_loop(fn))
         return fn
     return decorator
 
 
-@tool("process")
+def _registration_status(name):
+    if TOOL_TOOLSET[name] not in ENABLED_TOOLSETS:
+        return "disabled_by_toolsets"
+    if TOOL_ACCESS[name] not in ALLOWED_ACCESS:
+        return "disabled_by_profile"
+    return "enabled"
+
+
+@tool("process", "read")
 def list_toolsets() -> str:
-    """List tool groups and which are enabled. Disabled groups are enabled by
-    setting CE_MCP_TOOLSETS in the MCP server's environment and restarting it.
+    """List tool groups, the active profile, and which tools are registered.
+
+    Tools are disabled either by CE_MCP_TOOLSETS (their group is off) or by
+    CE_MCP_PROFILE (their access class is not allowed). Both are set in the MCP
+    server's environment and need a restart to change.
     """
     groups = {}
     for name, group in TOOL_TOOLSET.items():
@@ -738,25 +887,35 @@ def list_toolsets() -> str:
     return format_result({
         "success": True,
         "enabled": sorted(ENABLED_TOOLSETS),
+        "profile": CE_MCP_PROFILE,
+        "allowed_access": [a for a in ACCESS_CLASSES if a in ALLOWED_ACCESS],
+        "access_classes": ACCESS_CLASSES,
         "toolsets": {
             group: {
                 "enabled": group in ENABLED_TOOLSETS,
                 "description": TOOLSETS[group],
                 "tools": sorted(groups.get(group, [])),
+                "tool_status": {
+                    name: {"access": TOOL_ACCESS[name], "status": _registration_status(name)}
+                    for name in sorted(groups.get(group, []))
+                },
             }
             for group in TOOLSETS
         },
-        "how_to_enable": "Set CE_MCP_TOOLSETS (e.g. 'memory,scan,debug' or 'all') in the MCP server config and restart it.",
+        "how_to_enable": (
+            "Set CE_MCP_TOOLSETS (e.g. 'memory,scan,debug' or 'all') and/or CE_MCP_PROFILE "
+            "(readonly | standard | full) in the MCP server config and restart it."
+        ),
     })
 
 # --- PROCESS & MODULES ---
 
-@tool("process")
+@tool("process", "read")
 def get_process_info() -> str:
     """Get current process ID, name, modules count and architecture."""
     return format_result(ce_client.send_command("get_process_info"))
 
-@tool("process")
+@tool("process", "read")
 def enum_modules(offset: int = 0, limit: int = 100) -> str:
     """List all loaded modules (DLLs) with their base addresses and sizes.
 
@@ -768,7 +927,7 @@ def enum_modules(offset: int = 0, limit: int = 100) -> str:
     """
     return format_result(ce_client.send_command("enum_modules", {"offset": offset, "limit": limit}))
 
-@tool("process")
+@tool("process", "read")
 def get_thread_list(offset: int = 0, limit: int = 100) -> str:
     """Get list of threads in the attached process.
 
@@ -780,12 +939,12 @@ def get_thread_list(offset: int = 0, limit: int = 100) -> str:
     """
     return format_result(ce_client.send_command("get_thread_list", {"offset": offset, "limit": limit}))
 
-@tool("process")
+@tool("process", "read")
 def get_symbol_address(symbol: str) -> str:
     """Resolve a symbol name (e.g., 'Engine.GameEngine') to an address."""
     return format_result(ce_client.send_command("get_symbol_address", {"symbol": symbol}))
 
-@tool("process")
+@tool("process", "read")
 def get_address_info(address: str, include_modules: bool = True, include_symbols: bool = True, include_sections: bool = False) -> str:
     """Get symbolic name and module info for an address (Reverse of get_symbol_address)."""
     return format_result(ce_client.send_command("get_address_info", {
@@ -795,24 +954,24 @@ def get_address_info(address: str, include_modules: bool = True, include_symbols
         "include_sections": include_sections
     }))
 
-@tool("process")
+@tool("process", "read")
 def get_rtti_classname(address: str) -> str:
     """Try to identify the class name of an object at address using Run-Time Type Information."""
     return format_result(ce_client.send_command("get_rtti_classname", {"address": address}))
 
 # --- MEMORY READING ---
 
-@tool("memory")
+@tool("memory", "read")
 def read_memory(address: str, size: int = 256) -> str:
     """Read raw bytes from memory."""
     return format_result(ce_client.send_command("read_memory", {"address": address, "size": size}))
 
-@tool("memory")
+@tool("memory", "read")
 def read_integer(address: str, type: str = "dword") -> str:
     """Read a number from memory. Types: byte, word, dword, qword, float, double."""
     return format_result(ce_client.send_command("read_integer", {"address": address, "type": type}))
 
-@tool("memory")
+@tool("memory", "read")
 def read_string(address: str, max_length: int = 256, wide: bool = False, encoding: str = "utf8") -> str:
     """Read a string from memory.
 
@@ -832,7 +991,7 @@ def read_string(address: str, max_length: int = 256, wide: bool = False, encodin
     resolved_encoding = "utf16le" if wide else encoding
     return format_result(ce_client.send_command("read_string", {"address": address, "max_length": max_length, "wide": wide, "encoding": resolved_encoding}))
 
-@tool("memory")
+@tool("memory", "read")
 def read_pointer(address: str, offsets: list[int] = None) -> str:
     """Read a pointer chain. Returns the final address and value."""
     # Bridge supports 'read_pointer' for single dereference or 'read_pointer_chain' for multiple
@@ -841,12 +1000,12 @@ def read_pointer(address: str, offsets: list[int] = None) -> str:
     else:
         return format_result(ce_client.send_command("read_pointer_chain", {"base": address, "offsets": [0]}))
 
-@tool("memory")
+@tool("memory", "read")
 def read_pointer_chain(base: str, offsets: list[int]) -> str:
     """Follow a multi-level pointer chain and return analysis of every step."""
     return format_result(ce_client.send_command("read_pointer_chain", {"base": base, "offsets": offsets}))
 
-@tool("memory")
+@tool("memory", "read")
 def analyze_pointer_access(instruction: str, registers: dict, accessed_address: str = None, is_64bit: bool = None) -> str:
     """Parse a captured memory access (instruction + register snapshot from a breakpoint/DBVM hit) into base register, displacement, and the concrete struct-base address for pointer-chain walk-back. Pure analysis; no process access. next_scan_value is the address to scan for (as a pointer) to find the next level up."""
     return format_result(ce_client.send_command("analyze_pointer_access", {
@@ -856,7 +1015,7 @@ def analyze_pointer_access(instruction: str, registers: dict, accessed_address: 
         "is_64bit": is_64bit,
     }))
 
-@tool("memory")
+@tool("memory", "read")
 def validate_pointer_chains(chains: list, target: str, include_misses: bool = False) -> str:
     """Resolve a list of candidate pointer chains and report which currently land on `target`. Each chain is {"base": <addr|symbol>, "offsets": [int,...]}. Returns only matches by default (token-frugal); set include_misses=true to also list non-matches. Re-run after a game restart with the new target to find chains that stay valid (the stable pointer). Max 5000 chains per call."""
     return format_result(ce_client.send_command("validate_pointer_chains", {
@@ -865,14 +1024,14 @@ def validate_pointer_chains(chains: list, target: str, include_misses: bool = Fa
         "include_misses": include_misses,
     }))
 
-@tool("memory")
+@tool("memory", "read")
 def checksum_memory(address: str, size: int) -> str:
     """Calculate MD5 checksum of a memory region to detect changes."""
     return format_result(ce_client.send_command("checksum_memory", {"address": address, "size": size}))
 
 # --- SCANNING ---
 
-@tool("scan")
+@tool("scan", "analysis")
 def scan_all(value: str = None, type: str = "dword", protection: str = "+W-C",
              scan_option: str = "exact", value2: str = None) -> str:
     """Unified Memory Scanner (first scan).
@@ -890,7 +1049,7 @@ def scan_all(value: str = None, type: str = "dword", protection: str = "+W-C",
         "scan_option": scan_option, "value2": value2
     }))
 
-@tool("scan")
+@tool("scan", "read")
 def get_scan_results(offset: int = 0, limit: int = 100, max: int = None) -> str:
     """Get results from the last 'scan_all' operation.
 
@@ -903,7 +1062,7 @@ def get_scan_results(offset: int = 0, limit: int = 100, max: int = None) -> str:
     """
     return format_result(ce_client.send_command("get_scan_results", {"offset": offset, "limit": limit, "max": max}))
 
-@tool("scan")
+@tool("scan", "analysis")
 def next_scan(value: str = None, scan_type: str = "exact", value2: str = None) -> str:
     """Next scan to filter results from the last 'scan_all'.
 
@@ -916,43 +1075,43 @@ def next_scan(value: str = None, scan_type: str = "exact", value2: str = None) -
         "value": value, "scan_type": scan_type, "value2": value2
     }))
 
-@tool("memory")
+@tool("memory", "write")
 def write_integer(address: str, value: int, type: str = "dword") -> str:
     """Write a number to memory. Types: byte, word, dword, qword, float, double."""
     return format_result(ce_client.send_command("write_integer", {"address": address, "value": value, "type": type}))
 
-@tool("memory")
+@tool("memory", "write")
 def write_memory(address: str, bytes: list[int]) -> str:
     """Write raw bytes to memory."""
     return format_result(ce_client.send_command("write_memory", {"address": address, "bytes": bytes}))
 
-@tool("memory")
+@tool("memory", "write")
 def write_string(address: str, value: str, wide: bool = False) -> str:
     """Write a string to memory (ASCII or Wide/UTF-16)."""
     return format_result(ce_client.send_command("write_string", {"address": address, "value": value, "wide": wide}))
 
 
-@tool("scan")
+@tool("scan", "read")
 def aob_scan(pattern: str, protection: str = "+X", limit: int = 100) -> str:
     """Scan for an Array of Bytes (AOB) pattern. Example: '48 89 5C 24'."""
     return format_result(ce_client.send_command("aob_scan", {"pattern": pattern, "protection": protection, "limit": limit}))
 
-@tool("scan")
+@tool("scan", "read")
 def search_string(string: str, wide: bool = False, limit: int = 100) -> str:
     """Quickly search for a text string in memory."""
     return format_result(ce_client.send_command("search_string", {"string": string, "wide": wide, "limit": limit}))
 
-@tool("scan")
+@tool("scan", "read")
 def generate_signature(address: str) -> str:
     """Generate a unique AOB signature that can find this specific address again."""
     return format_result(ce_client.send_command("generate_signature", {"address": address}))
 
-@tool("scan")
+@tool("scan", "read")
 def get_memory_regions(max: int = 100) -> str:
     """Get list of valid memory regions nearby common bases."""
     return format_result(ce_client.send_command("get_memory_regions", {"max": max}))
 
-@tool("scan")
+@tool("scan", "read")
 def enum_memory_regions_full(offset: int = 0, limit: int = 100, max: int = None) -> str:
     """Enumerate ALL memory regions in the process (Native EnumMemoryRegions).
 
@@ -967,7 +1126,7 @@ def enum_memory_regions_full(offset: int = 0, limit: int = 100, max: int = None)
 
 # --- ANALYSIS & DISASSEMBLY ---
 
-@tool("analysis")
+@tool("analysis", "read")
 def disassemble(address: str, count: int = 20, offset: int = 0, limit: int = 100) -> str:
     """Disassemble instructions starting at an address.
 
@@ -981,22 +1140,22 @@ def disassemble(address: str, count: int = 20, offset: int = 0, limit: int = 100
     """
     return format_result(ce_client.send_command("disassemble", {"address": address, "count": count, "offset": offset, "limit": limit}))
 
-@tool("analysis")
+@tool("analysis", "read")
 def get_instruction_info(address: str) -> str:
     """Get detailed info about a single instruction (size, bytes, opcode)."""
     return format_result(ce_client.send_command("get_instruction_info", {"address": address}))
 
-@tool("analysis")
+@tool("analysis", "read")
 def find_function_boundaries(address: str, max_search: int = 4096) -> str:
     """Attempt to find the start and end of a function containing the address."""
     return format_result(ce_client.send_command("find_function_boundaries", {"address": address, "max_search": max_search}))
 
-@tool("analysis")
+@tool("analysis", "read")
 def analyze_function(address: str) -> str:
     """Analyze a function to find all CALL instructions output (calls made by this function)."""
     return format_result(ce_client.send_command("analyze_function", {"address": address}))
 
-@tool("analysis")
+@tool("analysis", "read")
 def find_references(address: str, offset: int = 0, limit: int = 50) -> str:
     """Find instructions that access (reference) this address.
 
@@ -1009,7 +1168,7 @@ def find_references(address: str, offset: int = 0, limit: int = 50) -> str:
     """
     return format_result(ce_client.send_command("find_references", {"address": address, "offset": offset, "limit": limit}))
 
-@tool("analysis")
+@tool("analysis", "read")
 def find_call_references(function_address: str, offset: int = 0, limit: int = 100) -> str:
     """Find all locations that CALL this function.
 
@@ -1022,14 +1181,14 @@ def find_call_references(function_address: str, offset: int = 0, limit: int = 10
     """
     return format_result(ce_client.send_command("find_call_references", {"address": function_address, "offset": offset, "limit": limit}))
 
-@tool("analysis")
+@tool("analysis", "read")
 def dissect_structure(address: str, size: int = 256) -> str:
     """Use CE's auto-guess feature to interpret memory at address as a structure."""
     return format_result(ce_client.send_command("dissect_structure", {"address": address, "size": size}))
 
 # --- DEBUGGING & BREAKPOINTS ---
 
-@tool("debug")
+@tool("debug", "write")
 def set_breakpoint(address: str, id: str = None, capture_registers: bool = True, capture_stack: bool = False, stack_depth: int = 16, max_hits: int = 1000) -> str:
     """Set a hardware execution breakpoint. Non-breaking/Logging only.
 
@@ -1048,7 +1207,7 @@ def set_breakpoint(address: str, id: str = None, capture_registers: bool = True,
         "max_hits": max_hits,
     }))
 
-@tool("debug")
+@tool("debug", "write")
 def set_data_breakpoint(address: str, id: str = None, access_type: str = "w", size: int = 4, max_hits: int = 1000) -> str:
     """Set a hardware data breakpoint (watchpoint). Types: 'r' (read), 'w' (write), 'rw' (access).
 
@@ -1062,22 +1221,22 @@ def set_data_breakpoint(address: str, id: str = None, access_type: str = "w", si
         "max_hits": max_hits,
     }))
 
-@tool("debug")
+@tool("debug", "write")
 def remove_breakpoint(id: str) -> str:
     """Remove a breakpoint by its ID."""
     return format_result(ce_client.send_command("remove_breakpoint", {"id": id}))
 
-@tool("debug")
+@tool("debug", "read")
 def list_breakpoints() -> str:
     """List all active breakpoints."""
     return format_result(ce_client.send_command("list_breakpoints"))
 
-@tool("debug")
+@tool("debug", "write")
 def clear_all_breakpoints() -> str:
     """Remove ALL breakpoints."""
     return format_result(ce_client.send_command("clear_all_breakpoints"))
 
-@tool("debug")
+@tool("debug", "analysis")
 def get_breakpoint_hits(id: str = None, clear: bool = False, offset: int = 0, limit: int = 100) -> str:
     """Get hits for a specific breakpoint ID (or all if None). Set clear=True to flush buffer.
 
@@ -1095,22 +1254,22 @@ def get_breakpoint_hits(id: str = None, clear: bool = False, offset: int = 0, li
 
 # --- DBVM / HYPERVISOR TOOLS (Ring -1) ---
 
-@tool("kernel")
+@tool("kernel", "read")
 def get_physical_address(address: str) -> str:
     """Translate Virtual Address to Physical Address (requires DBVM)."""
     return format_result(ce_client.send_command("get_physical_address", {"address": address}))
 
-@tool("kernel")
+@tool("kernel", "write")
 def start_dbvm_watch(address: str, mode: str = "w", max_entries: int = 1000) -> str:
     """Start invisible DBVM hypervisor watch. Modes: 'w' (writes), 'r' (reads), 'x' (execute)."""
     return format_result(ce_client.send_command("start_dbvm_watch", {"address": address, "mode": mode, "max_entries": max_entries}))
 
-@tool("kernel")
+@tool("kernel", "write")
 def stop_dbvm_watch(address: str) -> str:
     """Stop DBVM watch and return results."""
     return format_result(ce_client.send_command("stop_dbvm_watch", {"address": address}))
 
-@tool("kernel")
+@tool("kernel", "read")
 def poll_dbvm_watch(address: str, max_results: int = 1000) -> str:
     """Poll DBVM watch logs WITHOUT stopping. Returns register state at each execution hit."""
     return format_result(ce_client.send_command("poll_dbvm_watch", {
@@ -1120,7 +1279,7 @@ def poll_dbvm_watch(address: str, max_results: int = 1000) -> str:
 
 # --- KERNEL MODE / DBVM EXTENSIONS (Unit 21) ---
 
-@tool("kernel")
+@tool("kernel", "read")
 def dbk_get_cr0() -> str:
     """Read Control Register 0 (CR0) via the DBK kernel driver.
 
@@ -1129,7 +1288,7 @@ def dbk_get_cr0() -> str:
     """
     return format_result(ce_client.send_command("dbk_get_cr0"))
 
-@tool("kernel")
+@tool("kernel", "read")
 def dbk_get_cr3() -> str:
     """Read Control Register 3 (CR3 — page-table base) via DBK or DBVM.
 
@@ -1138,7 +1297,7 @@ def dbk_get_cr3() -> str:
     """
     return format_result(ce_client.send_command("dbk_get_cr3"))
 
-@tool("kernel")
+@tool("kernel", "read")
 def dbk_get_cr4() -> str:
     """Read Control Register 4 (CR4) via the DBK kernel driver.
 
@@ -1147,7 +1306,7 @@ def dbk_get_cr4() -> str:
     """
     return format_result(ce_client.send_command("dbk_get_cr4"))
 
-@tool("kernel")
+@tool("kernel", "read")
 def read_process_memory_cr3(cr3: str, address: str, size: int) -> str:
     """Read virtual memory using an explicit CR3 page-table base via DBK/DBVM.
 
@@ -1166,7 +1325,7 @@ def read_process_memory_cr3(cr3: str, address: str, size: int) -> str:
         {"cr3": cr3, "address": address, "size": size}
     ))
 
-@tool("kernel")
+@tool("kernel", "write")
 def write_process_memory_cr3(cr3: str, address: str, bytes: list) -> str:
     """Write to virtual memory using an explicit CR3 page-table base via DBK/DBVM.
 
@@ -1184,7 +1343,7 @@ def write_process_memory_cr3(cr3: str, address: str, bytes: list) -> str:
         {"cr3": cr3, "address": address, "bytes": bytes}
     ))
 
-@tool("kernel")
+@tool("kernel", "write")
 def map_memory(address: str, size: int) -> str:
     """Map a kernel/physical address range into the CE usermode context via DBK.
 
@@ -1202,7 +1361,7 @@ def map_memory(address: str, size: int) -> str:
         {"address": address, "size": size}
     ))
 
-@tool("kernel")
+@tool("kernel", "write")
 def unmap_memory(mapped_address: str, size: int = 0) -> str:
     """Release a memory mapping created by map_memory().
 
@@ -1220,7 +1379,7 @@ def unmap_memory(mapped_address: str, size: int = 0) -> str:
         {"mapped_address": mapped_address, "size": size}
     ))
 
-@tool("kernel")
+@tool("kernel", "write")
 def dbk_writes_ignore_write_protection(enable: bool) -> str:
     """Toggle whether DBK memory writes bypass copy-on-write (CoW) protection.
 
@@ -1238,7 +1397,7 @@ def dbk_writes_ignore_write_protection(enable: bool) -> str:
         {"enable": enable}
     ))
 
-@tool("kernel")
+@tool("kernel", "read")
 def get_physical_address_cr3(cr3: str, virtual_address: str) -> str:
     """Translate a virtual address to its physical address using an explicit CR3.
 
@@ -1259,7 +1418,7 @@ def get_physical_address_cr3(cr3: str, virtual_address: str) -> str:
 
 # --- SCRIPTING & CONTROL ---
 
-@tool("scripting")
+@tool("scripting", "exec")
 def evaluate_lua(code: str) -> str:
     """Execute arbitrary Lua code in Cheat Engine.
 
@@ -1269,12 +1428,12 @@ def evaluate_lua(code: str) -> str:
     """
     return format_result(ce_client.send_command("evaluate_lua", {"code": code}))
 
-@tool("scripting")
+@tool("scripting", "exec")
 def auto_assemble(script: str) -> str:
     """Run an AutoAssembler script (injection, code caves, etc)."""
     return format_result(ce_client.send_command("auto_assemble", {"script": script}))
 
-@tool("scripting")
+@tool("scripting", "read")
 def assemble_instruction(
     line: str,
     address: str = None,
@@ -1295,13 +1454,17 @@ def assemble_instruction(
     return format_result(ce_client.send_command("assemble_instruction", params))
 
 
-@tool("scripting")
+@tool("scripting", "exec")
 def auto_assemble_check(
     script: str,
     enable: bool = True,
     target_self: bool = False,
 ) -> str:
-    """Validate an Auto Assembler script for syntax errors without executing it.
+    """Validate an Auto Assembler script for syntax errors without assembling it.
+
+    SECURITY: classified `exec`. Cheat Engine still runs `{$lua}` blocks (and
+    registered AA command hooks) during a syntax check, so a script can run
+    arbitrary Lua even here.
 
     Returns {success, valid: bool, errors: [str]}.
     enable: True checks the [Enable] section; False checks [Disable].
@@ -1314,7 +1477,7 @@ def auto_assemble_check(
     }))
 
 
-@tool("scripting")
+@tool("scripting", "exec")
 def compile_c_code(
     source: str,
     address: str = None,
@@ -1334,7 +1497,7 @@ def compile_c_code(
     return format_result(ce_client.send_command("compile_c_code", params))
 
 
-@tool("scripting")
+@tool("scripting", "exec")
 def compile_cs_code(
     source: str,
     references: list = None,
@@ -1352,7 +1515,7 @@ def compile_cs_code(
     return format_result(ce_client.send_command("compile_cs_code", params))
 
 
-@tool("scripting")
+@tool("scripting", "read")
 def generate_api_hook_script(
     address: str,
     target_address: str,
@@ -1372,7 +1535,7 @@ def generate_api_hook_script(
     }))
 
 
-@tool("scripting")
+@tool("scripting", "read")
 def generate_code_injection_script(address: str) -> str:
     """Generate a boilerplate code-injection Auto Assembler script for an address.
 
@@ -1385,45 +1548,45 @@ def generate_code_injection_script(address: str) -> str:
     }))
 
 
-@tool("process")
+@tool("process", "read")
 def ping() -> str:
     """Check connectivity and get version info."""
     return format_result(ce_client.send_command("ping"))
 
 # --- DEBUG OUTPUT & MULTIMEDIA (Unit 23) ---
 
-@tool("gui")
+@tool("gui", "write")
 def output_debug_string(message: str) -> str:
     """Post a message to the Windows debugger via OutputDebugString (readable with tools like DebugView)."""
     return format_result(ce_client.send_command("output_debug_string", {"message": message}))
 
-@tool("gui")
+@tool("gui", "write")
 def speak_text(text: str, english_only: bool = False) -> str:
     """Speak text via Windows SAPI text-to-speech. Set english_only=True to force the English voice."""
     return format_result(ce_client.send_command("speak_text", {"text": text, "english_only": english_only}))
 
-@tool("gui")
+@tool("gui", "write")
 def play_sound(filename: str) -> str:
     """Play a WAV sound file by filename. Path must not contain '..' directory traversal."""
     return format_result(ce_client.send_command("play_sound", {"filename": filename}))
 
-@tool("gui")
+@tool("gui", "write")
 def beep() -> str:
     """Play a simple system beep sound."""
     return format_result(ce_client.send_command("beep", {}))
 
-@tool("gui")
+@tool("gui", "write")
 def set_progress_state(state: str) -> str:
     """Set the Cheat Engine taskbar progress state. Valid states: none, normal, paused, error, indeterminate."""
     return format_result(ce_client.send_command("set_progress_state", {"state": state}))
 
-@tool("gui")
+@tool("gui", "write")
 def set_progress_value(current: int, max: int) -> str:
     """Set the Cheat Engine taskbar progress bar position. Provide current value and maximum value."""
     return format_result(ce_client.send_command("set_progress_value", {"current": current, "max": max}))
 # --- THREADING & SYNCHRONIZATION (Unit-22) ---
 
-@tool("scripting")
+@tool("scripting", "exec")
 def create_thread(code: str, arg: str = "") -> str:
     """Execute Lua code in a new CE thread.
 
@@ -1434,7 +1597,7 @@ def create_thread(code: str, arg: str = "") -> str:
     """
     return format_result(ce_client.send_command("create_thread", {"code": code, "arg": arg}))
 
-@tool("scripting")
+@tool("scripting", "read")
 def get_global_variable(name: str) -> str:
     """Read a global variable from CE's main Lua state.
 
@@ -1443,7 +1606,7 @@ def get_global_variable(name: str) -> str:
     """
     return format_result(ce_client.send_command("get_global_variable", {"name": name}))
 
-@tool("scripting")
+@tool("scripting", "write")
 def set_global_variable(name: str, value: str) -> str:
     """Write a global variable in CE's main Lua state.
 
@@ -1452,7 +1615,7 @@ def set_global_variable(name: str, value: str) -> str:
     """
     return format_result(ce_client.send_command("set_global_variable", {"name": name, "value": value}))
 
-@tool("scripting")
+@tool("scripting", "exec")
 def queue_to_main_thread(code: str) -> str:
     """Queue Lua code to run on CE's main thread without waiting for its result.
 
@@ -1464,7 +1627,7 @@ def queue_to_main_thread(code: str) -> str:
     """
     return format_result(ce_client.send_command("queue_to_main_thread", {"code": code}))
 
-@tool("scripting")
+@tool("scripting", "read")
 def check_synchronize() -> str:
     """Process queued main-thread calls (checkSynchronize).
 
@@ -1473,7 +1636,7 @@ def check_synchronize() -> str:
     """
     return format_result(ce_client.send_command("check_synchronize"))
 
-@tool("scripting")
+@tool("scripting", "read")
 def in_main_thread() -> str:
     """Check whether the current code is running in CE's main thread.
 
@@ -1481,20 +1644,27 @@ def in_main_thread() -> str:
     """
     return format_result(ce_client.send_command("in_main_thread"))
 # >>> BEGIN UNIT-20b Shell Execution <<<
-def _check_shell_gate():
-    if os.environ.get("CE_MCP_ALLOW_SHELL") != "1":
-        return json.dumps({
-            "success": False,
-            "error": "Shell execution disabled. Set environment variable CE_MCP_ALLOW_SHELL=1 to enable.",
-            "error_code": "PERMISSION_DENIED"
-        })
-    return None
+def _check_shell_gate(method, params):
+    """Python-side half of the shell opt-in (the bridge checks its own half)."""
+    if os.environ.get("CE_MCP_ALLOW_SHELL") == "1":
+        return None
+    result = {
+        "success": False,
+        "error": "Shell execution disabled. Set CE_MCP_ALLOW_SHELL=1 in the MCP server's environment "
+                 "(and in Cheat Engine's; see README) to enable.",
+        "error_code": "PERMISSION_DENIED",
+    }
+    if ce_client.audit is not None:
+        ce_client.audit.record(method, params, "blocked", time.monotonic(), result=result)
+    return json.dumps(result)
 
-@tool("system")
+@tool("system", "exec")
 def run_command(command: str, args: str = "") -> str:
     """Execute a shell command in the host OS. SECURITY: Arbitrary code execution.
 
-    REQUIRES environment variable CE_MCP_ALLOW_SHELL=1 at server startup.
+    REQUIRES CE_MCP_ALLOW_SHELL=1 in the MCP server's environment AND the CE-side
+    opt-in (CE_MCP_ALLOW_SHELL=1 in Cheat Engine's environment, or
+    `CE_MCP_ALLOW_SHELL = true` before loading the bridge), plus CE_MCP_PROFILE=full.
     By default, this tool returns a PERMISSION_DENIED error.
 
     Args:
@@ -1503,16 +1673,19 @@ def run_command(command: str, args: str = "") -> str:
 
     Returns JSON with: success, output, exit_code.
     """
-    blocked = _check_shell_gate()
+    params = {"command": command, "args": args}
+    blocked = _check_shell_gate("run_command", params)
     if blocked:
         return blocked
-    return format_result(ce_client.send_command("run_command", {"command": command, "args": args}))
+    return format_result(ce_client.send_command("run_command", params))
 
-@tool("system")
+@tool("system", "exec")
 def shell_execute(command: str, args: str = "", verb: str = "open", working_dir: str = "", showcommand: int = None) -> str:
     """Invoke Windows ShellExecute. SECURITY: Arbitrary code execution.
 
-    REQUIRES environment variable CE_MCP_ALLOW_SHELL=1 at server startup.
+    REQUIRES CE_MCP_ALLOW_SHELL=1 in the MCP server's environment AND the CE-side
+    opt-in (CE_MCP_ALLOW_SHELL=1 in Cheat Engine's environment, or
+    `CE_MCP_ALLOW_SHELL = true` before loading the bridge), plus CE_MCP_PROFILE=full.
 
     Args:
         command: Command or file to execute.
@@ -1523,9 +1696,6 @@ def shell_execute(command: str, args: str = "", verb: str = "open", working_dir:
 
     Returns JSON with: success.
     """
-    blocked = _check_shell_gate()
-    if blocked:
-        return blocked
     params = {
         "command": command,
         "args": args,
@@ -1534,16 +1704,19 @@ def shell_execute(command: str, args: str = "", verb: str = "open", working_dir:
     }
     if showcommand is not None:
         params["showcommand"] = showcommand
+    blocked = _check_shell_gate("shell_execute", params)
+    if blocked:
+        return blocked
     return format_result(ce_client.send_command("shell_execute", params))
 # >>> END UNIT-20b <<<
 # >>> BEGIN UNIT-20a File IO Clipboard <<<
 
-@tool("system")
+@tool("system", "read")
 def file_exists(filename: str) -> str:
     """Check whether a file exists at the given path. Returns {success, exists: bool}."""
     return format_result(ce_client.send_command("file_exists", {"filename": filename}))
 
-@tool("system")
+@tool("system", "write")
 def delete_file(filename: str) -> str:
     """Delete a file at the given path. Returns {success}.
 
@@ -1553,32 +1726,32 @@ def delete_file(filename: str) -> str:
     """
     return format_result(ce_client.send_command("delete_file", {"filename": filename}))
 
-@tool("system")
+@tool("system", "read")
 def get_file_list(path: str) -> str:
     """List files in the given directory path. Returns {success, count, files: [str]}."""
     return format_result(ce_client.send_command("get_file_list", {"path": path}))
 
-@tool("system")
+@tool("system", "read")
 def get_directory_list(path: str) -> str:
     """List subdirectories in the given directory path. Returns {success, count, directories: [str]}."""
     return format_result(ce_client.send_command("get_directory_list", {"path": path}))
 
-@tool("system")
+@tool("system", "read")
 def get_temp_folder() -> str:
     """Return the path to the system temp folder. Returns {success, path: str}."""
     return format_result(ce_client.send_command("get_temp_folder"))
 
-@tool("system")
+@tool("system", "read")
 def get_file_version(filename: str) -> str:
     """Get the version info of a file (major, minor, release, build). Returns {success, major, minor, release, build, version_string}."""
     return format_result(ce_client.send_command("get_file_version", {"filename": filename}))
 
-@tool("system")
+@tool("system", "read")
 def read_clipboard() -> str:
     """Read text from the system clipboard. Returns {success, text: str}."""
     return format_result(ce_client.send_command("read_clipboard"))
 
-@tool("system")
+@tool("system", "write")
 def write_clipboard(text: str) -> str:
     """Write text to the system clipboard. Returns {success}."""
     return format_result(ce_client.send_command("write_clipboard", {"text": text}))
@@ -1586,7 +1759,7 @@ def write_clipboard(text: str) -> str:
 # >>> END UNIT-20a <<<
 # >>> BEGIN UNIT-19 Structure Management <<<
 
-@tool("analysis")
+@tool("analysis", "analysis")
 def create_structure(name: str) -> str:
     """Create a new empty CE structure definition and add it to the global list.
 
@@ -1598,7 +1771,7 @@ def create_structure(name: str) -> str:
     return format_result(ce_client.send_command("create_structure", {"name": name}))
 
 
-@tool("analysis")
+@tool("analysis", "read")
 def get_structure_by_name(name: str) -> str:
     """Find a CE structure by name in the global structure list.
 
@@ -1610,7 +1783,7 @@ def get_structure_by_name(name: str) -> str:
     return format_result(ce_client.send_command("get_structure_by_name", {"name": name}))
 
 
-@tool("analysis")
+@tool("analysis", "analysis")
 def add_element_to_structure(structure_id: int, name: str, offset: int, type: str) -> str:
     """Add a new element to an existing CE structure.
 
@@ -1631,7 +1804,7 @@ def add_element_to_structure(structure_id: int, name: str, offset: int, type: st
     }))
 
 
-@tool("analysis")
+@tool("analysis", "read")
 def get_structure_elements(structure_id: int) -> str:
     """Get all elements of a CE structure.
 
@@ -1643,7 +1816,7 @@ def get_structure_elements(structure_id: int) -> str:
     return format_result(ce_client.send_command("get_structure_elements", {"structure_id": structure_id}))
 
 
-@tool("analysis")
+@tool("analysis", "read")
 def export_structure_to_xml(structure_id: int) -> str:
     """Export a CE structure definition as XML.
 
@@ -1655,7 +1828,7 @@ def export_structure_to_xml(structure_id: int) -> str:
     return format_result(ce_client.send_command("export_structure_to_xml", {"structure_id": structure_id}))
 
 
-@tool("analysis")
+@tool("analysis", "analysis")
 def delete_structure(structure_id: int) -> str:
     """Delete a CE structure from the global list and free it.
 
@@ -1669,7 +1842,7 @@ def delete_structure(structure_id: int) -> str:
 # >>> END UNIT-19 <<<
 # >>> BEGIN UNIT-18 Cheat Table Records <<<
 
-@tool("table")
+@tool("table", "exec")
 def load_table(filename: str, merge: bool = False) -> str:
     """Load a Cheat Engine table (.ct) file into the current session.
 
@@ -1681,7 +1854,7 @@ def load_table(filename: str, merge: bool = False) -> str:
     """
     return format_result(ce_client.send_command("load_table", {"filename": filename, "merge": merge}))
 
-@tool("table")
+@tool("table", "write")
 def save_table(filename: str, protect: bool = False) -> str:
     """Save the current cheat table to a file.
 
@@ -1693,7 +1866,7 @@ def save_table(filename: str, protect: bool = False) -> str:
     """
     return format_result(ce_client.send_command("save_table", {"filename": filename, "protect": protect}))
 
-@tool("table")
+@tool("table", "read")
 def get_address_list(offset: int = 0, limit: int = 100) -> str:
     """List memory records in the current cheat table's address list.
 
@@ -1706,7 +1879,7 @@ def get_address_list(offset: int = 0, limit: int = 100) -> str:
     """
     return format_result(ce_client.send_command("get_address_list", {"offset": offset, "limit": limit}))
 
-@tool("table")
+@tool("table", "read")
 def get_memory_record(id: int = None, description: str = None) -> str:
     """Retrieve a single memory record by ID or description.
 
@@ -1723,7 +1896,7 @@ def get_memory_record(id: int = None, description: str = None) -> str:
         params["description"] = description
     return format_result(ce_client.send_command("get_memory_record", params))
 
-@tool("table")
+@tool("table", "analysis")
 def create_memory_record(description: str, address: str, var_type: str = "dword") -> str:
     """Create a new memory record in the cheat table address list.
 
@@ -1740,7 +1913,7 @@ def create_memory_record(description: str, address: str, var_type: str = "dword"
         "type": var_type,
     }))
 
-@tool("table")
+@tool("table", "analysis")
 def delete_memory_record(id: int) -> str:
     """Delete a memory record from the cheat table address list by ID.
 
@@ -1751,7 +1924,7 @@ def delete_memory_record(id: int) -> str:
     """
     return format_result(ce_client.send_command("delete_memory_record", {"id": id}))
 
-@tool("table")
+@tool("table", "read")
 def get_memory_record_value(id: int) -> str:
     """Read the current value of a memory record as a string.
 
@@ -1762,7 +1935,7 @@ def get_memory_record_value(id: int) -> str:
     """
     return format_result(ce_client.send_command("get_memory_record_value", {"id": id}))
 
-@tool("table")
+@tool("table", "write")
 def set_memory_record_value(id: int, value: str) -> str:
     """Write a value to a memory record (and therefore to the target process memory).
 
@@ -1777,53 +1950,53 @@ def set_memory_record_value(id: int, value: str) -> str:
 # >>> END UNIT-18 <<<
 # --- INPUT AUTOMATION (Unit-17) — system-wide, no process guard required ---
 
-@tool("gui")
+@tool("gui", "read")
 def get_pixel(x: int, y: int) -> str:
     """Get the colour of a screen pixel at (x, y). Returns r, g, b channels and the raw COLORREF integer."""
     return format_result(ce_client.send_command("get_pixel", {"x": x, "y": y}))
 
-@tool("gui")
+@tool("gui", "read")
 def get_mouse_pos() -> str:
     """Get the current mouse cursor position. Returns x and y screen coordinates."""
     return format_result(ce_client.send_command("get_mouse_pos"))
 
-@tool("gui")
+@tool("gui", "write")
 def set_mouse_pos(x: int, y: int) -> str:
     """Move the mouse cursor to screen position (x, y)."""
     return format_result(ce_client.send_command("set_mouse_pos", {"x": x, "y": y}))
 
-@tool("gui")
+@tool("gui", "read")
 def is_key_pressed(vk: int) -> str:
     """Check whether a key is currently held down.
     vk is a Windows virtual-key code (e.g. 0x41 for 'A', 0x20 for Space, 0x01 for left mouse button).
     Returns pressed: bool."""
     return format_result(ce_client.send_command("is_key_pressed", {"vk": vk}))
 
-@tool("gui")
+@tool("gui", "write")
 def key_down(vk: int) -> str:
     """Simulate pressing a key down (does NOT release it automatically).
     vk is a Windows virtual-key code (e.g. 0x41 for 'A', 0x20 for Space)."""
     return format_result(ce_client.send_command("key_down", {"vk": vk}))
 
-@tool("gui")
+@tool("gui", "write")
 def key_up(vk: int) -> str:
     """Release a key that was pressed with key_down.
     vk is a Windows virtual-key code (e.g. 0x41 for 'A', 0x20 for Space)."""
     return format_result(ce_client.send_command("key_up", {"vk": vk}))
 
-@tool("gui")
+@tool("gui", "write")
 def do_key_press(vk: int) -> str:
     """Simulate a full key press (down + up) for the given key.
     vk is a Windows virtual-key code (e.g. 0x41 for 'A', 0x20 for Space)."""
     return format_result(ce_client.send_command("do_key_press", {"vk": vk}))
 
-@tool("gui")
+@tool("gui", "read")
 def get_screen_info() -> str:
     """Get the primary screen dimensions and DPI. Returns width, height (pixels) and dpi."""
     return format_result(ce_client.send_command("get_screen_info"))
 # --- WINDOW / GUI TOOLS (Unit-16) ---
 
-@tool("gui")
+@tool("gui", "read")
 def find_window(title: str = None, class_name: str = None) -> str:
     """Find a top-level window by title and/or class name (system-wide, no process required).
 
@@ -1838,22 +2011,22 @@ def find_window(title: str = None, class_name: str = None) -> str:
         params["class_name"] = class_name
     return format_result(ce_client.send_command("find_window", params))
 
-@tool("gui")
+@tool("gui", "read")
 def get_window_caption(handle: str) -> str:
     """Return the caption (title bar text) of a window given its handle (hex string)."""
     return format_result(ce_client.send_command("get_window_caption", {"handle": handle}))
 
-@tool("gui")
+@tool("gui", "read")
 def get_window_class_name(handle: str) -> str:
     """Return the window class name of a window given its handle (hex string)."""
     return format_result(ce_client.send_command("get_window_class_name", {"handle": handle}))
 
-@tool("gui")
+@tool("gui", "read")
 def get_window_process_id(handle: str) -> str:
     """Return the process ID that owns a window given its handle (hex string)."""
     return format_result(ce_client.send_command("get_window_process_id", {"handle": handle}))
 
-@tool("gui")
+@tool("gui", "write")
 def send_window_message(handle: str, msg: int, wparam: int = 0, lparam: int = 0) -> str:
     """Send a Windows message (WM_*) to a window.
 
@@ -1871,7 +2044,7 @@ def send_window_message(handle: str, msg: int, wparam: int = 0, lparam: int = 0)
         "lparam": lparam,
     }))
 
-@tool("gui")
+@tool("gui", "write")
 def show_message(message: str) -> str:
     """Show a modal message dialog in Cheat Engine.
 
@@ -1883,7 +2056,7 @@ def show_message(message: str) -> str:
     """
     return format_result(ce_client.send_command("show_message", {"message": message}))
 
-@tool("gui")
+@tool("gui", "write")
 def input_query(caption: str, prompt: str, default: str = "") -> str:
     """Show a modal text-input dialog in Cheat Engine and return what the user typed.
 
@@ -1899,7 +2072,7 @@ def input_query(caption: str, prompt: str, default: str = "") -> str:
         "default": default,
     }))
 
-@tool("gui")
+@tool("gui", "write")
 def show_selection_list(caption: str, prompt: str, options: list) -> str:
     """Show a modal list-selection dialog in Cheat Engine.
 
@@ -1919,13 +2092,13 @@ def show_selection_list(caption: str, prompt: str, options: list) -> str:
 
 # --- UNIT 15: ADVANCED SCANNING ---
 
-@tool("scan")
+@tool("scan", "read")
 def aob_scan_unique(pattern: str, protection: str = "+X") -> str:
     """Scan for an AOB pattern that must match exactly once. Returns {success, address} or error with count.
     Use this when you expect a signature to be unique in the process."""
     return format_result(ce_client.send_command("aob_scan_unique", {"pattern": pattern, "protection": protection}))
 
-@tool("scan")
+@tool("scan", "read")
 def aob_scan_module(pattern: str, module_name: str, protection: str = "+X") -> str:
     """Scan for an AOB pattern restricted to a specific module's memory range.
     Returns {success, count, addresses: [str]}."""
@@ -1935,7 +2108,7 @@ def aob_scan_module(pattern: str, module_name: str, protection: str = "+X") -> s
         "protection": protection
     }))
 
-@tool("scan")
+@tool("scan", "read")
 def aob_scan_module_unique(pattern: str, module_name: str, protection: str = "+X") -> str:
     """Scan for an AOB pattern in a specific module that must match exactly once.
     Returns {success, address} or error with count."""
@@ -1945,7 +2118,7 @@ def aob_scan_module_unique(pattern: str, module_name: str, protection: str = "+X
         "protection": protection
     }))
 
-@tool("scan")
+@tool("scan", "analysis")
 def pointer_rescan(value: str, previous_results_file: str = None) -> str:
     """Re-scan an existing pointer scan for a new value. Requires a prior pointer scan in CE.
     Returns {success, result_count}. Run a Pointer Scanner scan in CE first."""
@@ -1954,13 +2127,13 @@ def pointer_rescan(value: str, previous_results_file: str = None) -> str:
         params["previous_results_file"] = previous_results_file
     return format_result(ce_client.send_command("pointer_rescan", params))
 
-@tool("scan")
+@tool("scan", "analysis")
 def create_persistent_scan(name: str) -> str:
     """Create a named, stateful memory scan session. Use the name with persistent_scan_* tools.
     Returns {success, scan_name}."""
     return format_result(ce_client.send_command("create_persistent_scan", {"name": name}))
 
-@tool("scan")
+@tool("scan", "analysis")
 def persistent_scan_first_scan(name: str, value: str = None, type: str = "dword", scan_option: str = "exact", value2: str = None) -> str:
     """Run the first scan on a named persistent scan session.
     Types: byte, word, dword, qword, float, double, string.
@@ -1975,7 +2148,7 @@ def persistent_scan_first_scan(name: str, value: str = None, type: str = "dword"
         params["value2"] = value2
     return format_result(ce_client.send_command("persistent_scan_first_scan", params))
 
-@tool("scan")
+@tool("scan", "analysis")
 def persistent_scan_next_scan(name: str, value: str = None, scan_option: str = "exact", value2: str = None) -> str:
     """Narrow down results with a next scan on a named persistent scan session.
     Scan options: exact, between, bigger, smaller, increased, decreased, increased_by, decreased_by, changed, unchanged.
@@ -1988,7 +2161,7 @@ def persistent_scan_next_scan(name: str, value: str = None, scan_option: str = "
         params["value2"] = value2
     return format_result(ce_client.send_command("persistent_scan_next_scan", params))
 
-@tool("scan")
+@tool("scan", "read")
 def persistent_scan_get_results(name: str, offset: int = 0, limit: int = 100) -> str:
     """Get paginated results from a named persistent scan session.
     Returns {success, total, offset, limit, results: [{address, value}]}."""
@@ -1998,59 +2171,59 @@ def persistent_scan_get_results(name: str, offset: int = 0, limit: int = 100) ->
         "limit": limit
     }))
 
-@tool("scan")
+@tool("scan", "analysis")
 def persistent_scan_destroy(name: str) -> str:
     """Destroy a named persistent scan session and free its memory.
     Returns {success, scan_name, destroyed}."""
     return format_result(ce_client.send_command("persistent_scan_destroy", {"name": name}))
 # --- MEMORY OPERATIONS (Unit 14) ---
 
-@tool("memory")
+@tool("memory", "write")
 def copy_memory(source: str, size: int, dest: str = None, method: int = 0) -> str:
     """Copy memory between addresses. Methods: 0=target→target, 1=target→CE, 2=CE→target, 3=CE→CE. Returns dest_address allocated by CE if dest is None."""
     return format_result(ce_client.send_command("copy_memory", {
         "source": source, "size": size, "dest": dest, "method": method
     }))
 
-@tool("memory")
+@tool("memory", "read")
 def compare_memory(addr1: str, addr2: str, size: int, method: int = 0) -> str:
     """Compare two memory regions. Methods: 0=target/target, 1=addr1=target addr2=CE, 2=both CE. Returns equal flag and first_diff byte index (-1 if equal)."""
     return format_result(ce_client.send_command("compare_memory", {
         "addr1": addr1, "addr2": addr2, "size": size, "method": method
     }))
 
-@tool("memory")
+@tool("memory", "write")
 def write_region_to_file(address: str, size: int, filename: str) -> str:
     """Write a memory region to a file. Filename must be an absolute path and must not contain '..' components."""
     return format_result(ce_client.send_command("write_region_to_file", {
         "address": address, "size": size, "filename": filename
     }))
 
-@tool("memory")
+@tool("memory", "write")
 def read_region_from_file(filename: str, destination: str) -> str:
     """Read a file into memory at the given destination address. Filename must be an absolute path and must not contain '..' components."""
     return format_result(ce_client.send_command("read_region_from_file", {
         "filename": filename, "destination": destination
     }))
 
-@tool("memory")
+@tool("memory", "read")
 def md5_memory(address: str, size: int) -> str:
     """Calculate the MD5 hash of a memory region. Returns the hash as a hex string."""
     return format_result(ce_client.send_command("md5_memory", {
         "address": address, "size": size
     }))
 
-@tool("memory")
+@tool("memory", "read")
 def md5_file(filename: str) -> str:
     """Calculate the MD5 hash of a file on the CE host. Filename must not contain '..' components."""
     return format_result(ce_client.send_command("md5_file", {"filename": filename}))
 
-@tool("memory")
+@tool("memory", "write")
 def create_section(size: int) -> str:
     """Create a Windows section (shared memory) of the given size. Returns a handle as a hex string."""
     return format_result(ce_client.send_command("create_section", {"size": size}))
 
-@tool("memory")
+@tool("memory", "write")
 def map_view_of_section(handle: str, address: str = None, size: int = 0) -> str:
     """Map a section into the target process. 'handle' is from create_section. 'address' is optional preferred base. Returns mapped_address."""
     return format_result(ce_client.send_command("map_view_of_section", {
@@ -2058,7 +2231,7 @@ def map_view_of_section(handle: str, address: str = None, size: int = 0) -> str:
     }))
 
 # >>> BEGIN UNIT-12 Symbol Management <<<
-@tool("analysis")
+@tool("analysis", "analysis")
 def register_symbol(name: str, address: str, do_not_save: bool = False) -> str:
     """Register a user-defined symbol with a given name and address.
 
@@ -2073,7 +2246,7 @@ def register_symbol(name: str, address: str, do_not_save: bool = False) -> str:
         "name": name, "address": address, "do_not_save": do_not_save
     }))
 
-@tool("analysis")
+@tool("analysis", "analysis")
 def unregister_symbol(name: str) -> str:
     """Remove a previously registered user-defined symbol.
 
@@ -2084,7 +2257,7 @@ def unregister_symbol(name: str) -> str:
     """
     return format_result(ce_client.send_command("unregister_symbol", {"name": name}))
 
-@tool("analysis")
+@tool("analysis", "read")
 def enum_registered_symbols() -> str:
     """List all user-registered symbols.
 
@@ -2092,7 +2265,7 @@ def enum_registered_symbols() -> str:
     """
     return format_result(ce_client.send_command("enum_registered_symbols"))
 
-@tool("analysis")
+@tool("analysis", "analysis")
 def delete_all_registered_symbols() -> str:
     """Delete every user-registered symbol (both AA and Lua).
 
@@ -2100,7 +2273,7 @@ def delete_all_registered_symbols() -> str:
     """
     return format_result(ce_client.send_command("delete_all_registered_symbols"))
 
-@tool("analysis")
+@tool("analysis", "analysis")
 def enable_windows_symbols() -> str:
     """Trigger download and load of Windows PDB symbol files.
 
@@ -2111,7 +2284,7 @@ def enable_windows_symbols() -> str:
     """
     return format_result(ce_client.send_command("enable_windows_symbols"))
 
-@tool("analysis")
+@tool("analysis", "analysis")
 def enable_kernel_symbols() -> str:
     """Enable kernel-mode symbol resolution (requires DBK driver).
 
@@ -2120,7 +2293,7 @@ def enable_kernel_symbols() -> str:
     """
     return format_result(ce_client.send_command("enable_kernel_symbols"))
 
-@tool("analysis")
+@tool("analysis", "read")
 def get_symbol_info(name: str) -> str:
     """Retrieve detailed information about a known symbol.
 
@@ -2134,7 +2307,7 @@ def get_symbol_info(name: str) -> str:
     """
     return format_result(ce_client.send_command("get_symbol_info", {"name": name}))
 
-@tool("analysis")
+@tool("analysis", "read")
 def get_module_size(module_name: str) -> str:
     """Get the in-memory size of a loaded module.
 
@@ -2147,7 +2320,7 @@ def get_module_size(module_name: str) -> str:
     """
     return format_result(ce_client.send_command("get_module_size", {"module_name": module_name}))
 
-@tool("analysis")
+@tool("analysis", "analysis")
 def load_new_symbols() -> str:
     """Scan for newly loaded modules and import their symbols.
 
@@ -2155,7 +2328,7 @@ def load_new_symbols() -> str:
     """
     return format_result(ce_client.send_command("load_new_symbols"))
 
-@tool("analysis")
+@tool("analysis", "analysis")
 def reinitialize_symbol_handler() -> str:
     """Perform a full reset and reload of the Cheat Engine symbol handler.
 
@@ -2165,32 +2338,32 @@ def reinitialize_symbol_handler() -> str:
 # >>> END UNIT-12 <<<
 # --- UNIT-11: DEBUG CONTEXT + PER-THREAD BREAKPOINTS ---
 
-@tool("debug")
+@tool("debug", "read")
 def debug_get_context(extra_regs: bool = False) -> str:
     """Get the current thread's CPU register context. Set extra_regs=True to include XMM0-15 and FP0-7."""
     return format_result(ce_client.send_command("debug_get_context", {"extra_regs": extra_regs}))
 
-@tool("debug")
+@tool("debug", "write")
 def debug_set_context(registers: dict) -> str:
     """Set CPU register values in the paused thread. Pass a dict like {\"RAX\": \"0x1234\", \"RIP\": \"0x140001000\"}."""
     return format_result(ce_client.send_command("debug_set_context", {"registers": registers}))
 
-@tool("debug")
+@tool("debug", "read")
 def debug_get_xmm_pointer(xmm_nr: int = 0) -> str:
     """Return the CE-local memory address of an XMM register (0-15) for the currently broken thread."""
     return format_result(ce_client.send_command("debug_get_xmm_pointer", {"xmm_nr": xmm_nr}))
 
-@tool("debug")
+@tool("debug", "write")
 def debug_set_last_branch_recording(enable: bool) -> str:
     """Enable or disable Intel LBR (Last Branch Recording). Requires kernel-mode debugger."""
     return format_result(ce_client.send_command("debug_set_last_branch_recording", {"enable": enable}))
 
-@tool("debug")
+@tool("debug", "read")
 def debug_get_last_branch_record(index: int) -> str:
     """Get the from/to addresses of a Last Branch Record entry at the given index."""
     return format_result(ce_client.send_command("debug_get_last_branch_record", {"index": index}))
 
-@tool("debug")
+@tool("debug", "write")
 def debug_set_breakpoint_for_thread(thread_id: int, address: str, size: int = 1, trigger: str = "execute", max_hits: int = 1000) -> str:
     """Set a breakpoint that fires only on a specific thread. trigger: execute|write|read|access.
 
@@ -2204,7 +2377,7 @@ def debug_set_breakpoint_for_thread(thread_id: int, address: str, size: int = 1,
         "max_hits": max_hits,
     }))
 
-@tool("debug")
+@tool("debug", "write")
 def debug_remove_breakpoint_for_thread(thread_id: int, address: str) -> str:
     """Remove a per-thread breakpoint at the given address for the given thread."""
     return format_result(ce_client.send_command("debug_remove_breakpoint_for_thread", {
@@ -2214,7 +2387,7 @@ def debug_remove_breakpoint_for_thread(thread_id: int, address: str) -> str:
 
 # --- DEBUGGER CONTROL (Unit 10) ---
 
-@tool("debug")
+@tool("debug", "write")
 def debug_process(interface: int = 0) -> str:
     """Start the CE debugger for the currently opened process.
 
@@ -2225,7 +2398,7 @@ def debug_process(interface: int = 0) -> str:
     """
     return format_result(ce_client.send_command("debug_process", {"interface": interface}))
 
-@tool("debug")
+@tool("debug", "read")
 def debug_is_debugging() -> str:
     """Check whether the CE debugger has been started.
 
@@ -2233,7 +2406,7 @@ def debug_is_debugging() -> str:
     """
     return format_result(ce_client.send_command("debug_is_debugging"))
 
-@tool("debug")
+@tool("debug", "read")
 def debug_get_current_debugger_interface() -> str:
     """Return the active debugger interface used by CE.
 
@@ -2242,7 +2415,7 @@ def debug_get_current_debugger_interface() -> str:
     """
     return format_result(ce_client.send_command("debug_get_current_debugger_interface"))
 
-@tool("debug")
+@tool("debug", "write")
 def debug_break_thread(thread_id: int) -> str:
     """Break a specific thread by its thread ID.
 
@@ -2251,7 +2424,7 @@ def debug_break_thread(thread_id: int) -> str:
     """
     return format_result(ce_client.send_command("debug_break_thread", {"thread_id": thread_id}))
 
-@tool("debug")
+@tool("debug", "write")
 def debug_continue(method: str = "run") -> str:
     """Continue execution from a breakpoint.
 
@@ -2260,7 +2433,7 @@ def debug_continue(method: str = "run") -> str:
     """
     return format_result(ce_client.send_command("debug_continue", {"method": method}))
 
-@tool("debug")
+@tool("debug", "write")
 def debug_detach() -> str:
     """Detach the debugger from the target process if possible.
 
@@ -2268,7 +2441,7 @@ def debug_detach() -> str:
     """
     return format_result(ce_client.send_command("debug_detach"))
 
-@tool("debug")
+@tool("debug", "write")
 def pause_process() -> str:
     """Pause (freeze) the currently opened process using CE's global pause() function.
 
@@ -2276,7 +2449,7 @@ def pause_process() -> str:
     """
     return format_result(ce_client.send_command("pause_process"))
 
-@tool("debug")
+@tool("debug", "write")
 def unpause_process() -> str:
     """Resume (unfreeze) the currently opened process using CE's global unpause() function.
 
@@ -2285,7 +2458,7 @@ def unpause_process() -> str:
     return format_result(ce_client.send_command("unpause_process"))
 # --- CODE INJECTION & EXECUTION ---
 
-@tool("scripting")
+@tool("scripting", "exec")
 def inject_dll(filepath: str, skip_symbol_reload: bool = False) -> str:
     """Inject a DLL into the currently attached target process.
 
@@ -2303,7 +2476,7 @@ def inject_dll(filepath: str, skip_symbol_reload: bool = False) -> str:
         "skip_symbol_reload": skip_symbol_reload,
     }))
 
-@tool("scripting")
+@tool("scripting", "exec")
 def inject_dotnet_dll(
     filepath: str,
     class_name: str,
@@ -2335,7 +2508,7 @@ def inject_dotnet_dll(
         "timeout":     timeout,
     }))
 
-@tool("scripting")
+@tool("scripting", "exec")
 def execute_code(address: str, param: int = 0, timeout: int = -1) -> str:
     """Call a stdcall function with one argument at the given address in the target process.
 
@@ -2355,7 +2528,7 @@ def execute_code(address: str, param: int = 0, timeout: int = -1) -> str:
         "timeout": timeout,
     }))
 
-@tool("scripting")
+@tool("scripting", "exec")
 def execute_code_ex(
     call_method: int,
     timeout: int,
@@ -2389,7 +2562,7 @@ def execute_code_ex(
         "args":        args or [],
     }))
 
-@tool("scripting")
+@tool("scripting", "exec")
 def execute_method(
     address: str,
     instance: str,
@@ -2422,7 +2595,7 @@ def execute_method(
         "timeout":     timeout,
     }))
 
-@tool("scripting")
+@tool("scripting", "exec")
 def execute_code_local(address: str, param: int = 0) -> str:
     """Call a stdcall function inside Cheat Engine's own process (NOT the target).
 
@@ -2442,7 +2615,7 @@ def execute_code_local(address: str, param: int = 0) -> str:
         "param":   param,
     }))
 
-@tool("scripting")
+@tool("scripting", "exec")
 def execute_code_local_ex(
     address: str,
     args: list = None,
@@ -2474,7 +2647,7 @@ def execute_code_local_ex(
 
 # >>> BEGIN UNIT-08 Memory Allocation <<<
 
-@tool("memory")
+@tool("memory", "write")
 def allocate_memory(size: int, base_address: str = None, protection: str = "rwx") -> str:
     """Allocate memory in the target process.
 
@@ -2491,7 +2664,7 @@ def allocate_memory(size: int, base_address: str = None, protection: str = "rwx"
         params["base_address"] = base_address
     return format_result(ce_client.send_command("allocate_memory", params))
 
-@tool("memory")
+@tool("memory", "write")
 def free_memory(address: str, size: int = 0) -> str:
     """Free memory previously allocated in the target process.
 
@@ -2503,7 +2676,7 @@ def free_memory(address: str, size: int = 0) -> str:
     """
     return format_result(ce_client.send_command("free_memory", {"address": address, "size": size}))
 
-@tool("memory")
+@tool("memory", "write")
 def allocate_shared_memory(name: str, size: int) -> str:
     """Create and map a shared memory region in the target process.
 
@@ -2517,7 +2690,7 @@ def allocate_shared_memory(name: str, size: int) -> str:
     """
     return format_result(ce_client.send_command("allocate_shared_memory", {"name": name, "size": size}))
 
-@tool("memory")
+@tool("memory", "read")
 def get_memory_protection(address: str) -> str:
     """Query the protection flags of a memory page in the target process.
 
@@ -2528,7 +2701,7 @@ def get_memory_protection(address: str) -> str:
     """
     return format_result(ce_client.send_command("get_memory_protection", {"address": address}))
 
-@tool("memory")
+@tool("memory", "write")
 def set_memory_protection(address: str, size: int, read: bool = True, write: bool = True, execute: bool = True) -> str:
     """Change the protection flags of a memory region in the target process.
 
@@ -2545,7 +2718,7 @@ def set_memory_protection(address: str, size: int, read: bool = True, write: boo
         "address": address, "size": size, "read": read, "write": write, "execute": execute
     }))
 
-@tool("memory")
+@tool("memory", "write")
 def full_access(address: str, size: int) -> str:
     """Grant full read-write-execute access to a memory region (convenience wrapper).
 
@@ -2557,7 +2730,7 @@ def full_access(address: str, size: int) -> str:
     """
     return format_result(ce_client.send_command("full_access", {"address": address, "size": size}))
 
-@tool("kernel")
+@tool("kernel", "write")
 def allocate_kernel_memory(size: int) -> str:
     """Allocate non-paged kernel memory via the DBK driver.
 
@@ -2574,7 +2747,7 @@ def allocate_kernel_memory(size: int) -> str:
 # >>> END UNIT-08 <<<
 # >>> BEGIN UNIT-07 Process Lifecycle <<<
 
-@tool("process")
+@tool("process", "analysis")
 def open_process(process_id_or_name: str) -> str:
     """Open a process by PID or name and attach Cheat Engine to it.
 
@@ -2586,7 +2759,7 @@ def open_process(process_id_or_name: str) -> str:
     """
     return format_result(ce_client.send_command("open_process", {"process_id_or_name": process_id_or_name}))
 
-@tool("process")
+@tool("process", "read")
 def get_process_list() -> str:
     """Get the list of running processes on the system.
 
@@ -2595,7 +2768,7 @@ def get_process_list() -> str:
     """
     return format_result(ce_client.send_command("get_process_list"))
 
-@tool("process")
+@tool("process", "read")
 def get_processid_from_name(name: str) -> str:
     """Look up the PID of a process by its executable name.
 
@@ -2607,7 +2780,7 @@ def get_processid_from_name(name: str) -> str:
     """
     return format_result(ce_client.send_command("get_processid_from_name", {"name": name}))
 
-@tool("process")
+@tool("process", "read")
 def get_foreground_process() -> str:
     """Get the PID and window handle of the process currently in the foreground.
 
@@ -2616,7 +2789,7 @@ def get_foreground_process() -> str:
     """
     return format_result(ce_client.send_command("get_foreground_process"))
 
-@tool("process")
+@tool("process", "exec")
 def create_process(path: str, args: str = "", debug: bool = False, break_on_entry: bool = False) -> str:
     """Create and optionally debug a new process.
 
@@ -2636,7 +2809,7 @@ def create_process(path: str, args: str = "", debug: bool = False, break_on_entr
         "break_on_entry": break_on_entry,
     }))
 
-@tool("process")
+@tool("process", "read")
 def get_opened_process_id() -> str:
     """Get the PID of the process currently attached to Cheat Engine.
 
@@ -2645,7 +2818,7 @@ def get_opened_process_id() -> str:
     """
     return format_result(ce_client.send_command("get_opened_process_id"))
 
-@tool("process")
+@tool("process", "read")
 def get_opened_process_handle() -> str:
     """Get the OS handle of the process currently attached to Cheat Engine as a hex string.
 
