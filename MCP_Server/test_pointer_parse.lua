@@ -6,7 +6,7 @@ local here = arg[0]:match("^(.*)[/\\]") or "."
 -- the JSON codec at line 357), so extract and load only the UNIT-24 slice over a
 -- small toHex fixture (UNIT-24's only chunk-local dependency).
 local function loadUnit24()
-    local f = assert(io.open(here .. "/ce_mcp_bridge.lua", "r"))
+    local f = assert(io.open(here .. "/bridge/24_pointer_analysis.lua", "r"))
     local src = f:read("*a"); f:close()
     local slice = src:match("(%-%- >>> BEGIN UNIT%-24.-END UNIT%-24)")
     assert(slice, "could not find UNIT-24 slice (markers missing?)")

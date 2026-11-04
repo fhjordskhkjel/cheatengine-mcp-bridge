@@ -12,7 +12,8 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 SERVER_DIR = HERE.parent
-BRIDGE_LUA = SERVER_DIR / "ce_mcp_bridge.lua"
+BRIDGE_LUA = SERVER_DIR / "ce_mcp_bridge.lua"   # the loader
+BRIDGE_MODULES = sorted((SERVER_DIR / "bridge").glob("*.lua"))
 
 # mcp_cheatengine picks its transport at import time; the named-pipe client
 # needs pywin32, so the offline suite always talks TCP.
@@ -25,7 +26,7 @@ def frame(body: bytes) -> bytes:
 
 
 class Bridge:
-    """ce_mcp_bridge.lua loaded into Lua 5.3 (CE's version) with ce_stub.lua."""
+    """The bridge (loader + bridge/*.lua) loaded into Lua 5.3 (CE's version) with ce_stub.lua."""
 
     def __init__(self, prelude=b""):
         lupa = pytest.importorskip("lupa")
@@ -33,15 +34,10 @@ class Bridge:
         self.L.execute((HERE / "ce_stub.lua").read_bytes())
         if prelude:
             self.L.execute(prelude)  # runs before the bridge loads, like a CE user's setup
-        # Windows checkouts may have CRLF line endings (core.autocrlf).
-        src = BRIDGE_LUA.read_bytes().replace(b"\r\n", b"\n")
-        hook = b"\n-- Auto-start\nStartMCPBridge()"
-        assert hook in src, "auto-start marker moved; update conftest.Bridge"
-        src = src.replace(hook, b"\n_TEST = { json = json, exec = executeCommand, serve = serveOneRequest }\n")
-        self.L.execute(src)
+        # Load through the real loader, exactly as Cheat Engine does with dofile().
+        self.B = self.L.eval(b"dofile")(str(BRIDGE_LUA).encode())
         self.G = self.L.globals()
-        t = self.G[b"_TEST"]
-        self.json, self.exec, self.serve = t[b"json"], t[b"exec"], t[b"serve"]
+        self.json, self.exec, self.serve = self.B[b"json"], self.B[b"executeCommand"], self.B[b"serveOneRequest"]
 
     def call(self, method, **params):
         req = json.dumps({"jsonrpc": "2.0", "method": method, "params": params, "id": 7},

@@ -3,7 +3,7 @@
 local here = (arg and arg[0] and arg[0]:match("^(.*)[/\\]")) or "."
 
 local function loadCodec()
-    local f = assert(io.open(here .. "/ce_mcp_bridge.lua", "r"))
+    local f = assert(io.open(here .. "/bridge/01_json.lua", "r"))
     local src = f:read("*a"); f:close()
     local slice = src:match("(local json = %(function%(%).-\nend%)%(%))")
     assert(slice, "could not find JSON codec slice")

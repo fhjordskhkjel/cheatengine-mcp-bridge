@@ -1,7 +1,7 @@
 """Run the standalone Lua unit tests under Lua 5.3 (CE) and 5.4 via lupa."""
 import pytest
 
-from conftest import SERVER_DIR
+from conftest import BRIDGE_LUA, BRIDGE_MODULES, SERVER_DIR
 
 lupa = pytest.importorskip("lupa")
 LUA_TESTS = ["test_json_codec.lua", "test_pointer_parse.lua"]
@@ -30,11 +30,13 @@ def test_lua_script(script, version):
 
 
 @pytest.mark.parametrize("version", sorted(RUNTIMES))
-def test_bridge_compiles(version):
+@pytest.mark.parametrize("path", [BRIDGE_LUA] + BRIDGE_MODULES, ids=lambda p: p.name)
+def test_bridge_compiles(version, path):
+    """Each file is its own chunk, so this also enforces CE's 200-local limit per module."""
     module = getattr(lupa, RUNTIMES[version], None)
     if module is None:
         pytest.skip(f"lupa has no Lua {version} runtime")
     L = module.LuaRuntime(encoding=None)
-    compile_only = L.eval(b"function(src) local f, err = load(src, '@ce_mcp_bridge.lua') return f ~= nil, err end")
-    ok, err = compile_only((SERVER_DIR / "ce_mcp_bridge.lua").read_bytes())
+    compile_only = L.eval(b"function(src, name) local f, err = load(src, name) return f ~= nil, err end")
+    ok, err = compile_only(path.read_bytes(), b"@" + path.name.encode())
     assert ok, err

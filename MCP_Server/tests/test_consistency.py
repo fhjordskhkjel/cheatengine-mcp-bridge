@@ -6,7 +6,8 @@ from conftest import SERVER_DIR
 
 REPO = SERVER_DIR.parent
 PY = (SERVER_DIR / "mcp_cheatengine.py").read_text(encoding="utf-8")
-LUA = (SERVER_DIR / "ce_mcp_bridge.lua").read_text(encoding="utf-8")
+BRIDGE_FILES = [SERVER_DIR / "ce_mcp_bridge.lua"] + sorted((SERVER_DIR / "bridge").glob("*.lua"))
+LUA = "\n".join(p.read_text(encoding="utf-8") for p in BRIDGE_FILES)
 RELAY = (SERVER_DIR / "ce_tcp_relay.py").read_text(encoding="utf-8")
 
 
@@ -99,7 +100,7 @@ def _failure_tables(src):
 
 def test_every_lua_failure_has_an_error_code():
     bare = [line for line, table in _failure_tables(LUA) if "error_code" not in table]
-    assert not bare, f"success = false without error_code at ce_mcp_bridge.lua lines {bare}"
+    assert not bare, f"success = false without error_code at (concatenated bridge) lines {bare}"
 
 
 def test_error_codes_are_from_the_enum():
