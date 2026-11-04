@@ -8,7 +8,7 @@ Usage: python tests/test_lua_analysis.py [path/to/ce_mcp_bridge.lua] [--real]
           (exports/imports are cross-checked with GetProcAddress, sections with VirtualQuery).
 Set BRIDGE_TEST_DUMP=<file> to write the generated x64 Lua test program for debugging.
 """
-import ctypes, ctypes.wintypes as wt, json, struct, sys, os
+import json, struct, sys, os
 
 from lua_harness import run_lua, bridge_modules, arg_path, has_flag, finish, compile_check, BRIDGE_DIR
 
@@ -598,6 +598,7 @@ print("%d passed, %d failed" % (passed, failed))
 
 # --------------------------------------------------------------------------- real DLL validation
 if has_flag("--real"):
+    import ctypes, ctypes.wintypes as wt          # Windows only: real DLLs are validated against Windows itself
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     k32.LoadLibraryW.restype = ctypes.c_void_p
     k32.LoadLibraryW.argtypes = [wt.LPCWSTR]

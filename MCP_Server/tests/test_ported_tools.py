@@ -276,3 +276,17 @@ def test_batch_gate(mod, monkeypatch):
     monkeypatch.setattr(mod, "ENABLED_TOOLSETS", {"process", "memory"})            # CE_MCP_TOOLSETS=memory
     out = json.loads(mod.batch_commands([{"method": "read_integer"}, {"method": "disassemble"}]))
     assert out["error_code"] == "PERMISSION_DENIED" and "disabled_by_toolsets" in out["error"]
+
+
+def test_wire_aliases_are_complete(mod):
+    """Every dispatcher entry without a tool of the same name is an alias the batch gate must know about."""
+    import re
+
+    from conftest import SERVER_DIR
+
+    lua = (SERVER_DIR / "bridge" / "31_dispatcher.lua").read_text(encoding="utf-8")
+    start = lua.index("local commandHandlers = {")
+    entries = re.findall(r"^\s*([a-z0-9_]+)\s*=\s*[A-Za-z0-9_]+\s*,", lua[start:lua.index("\n}", start)], re.M)
+    without_tool = {name for name in entries if name not in mod.TOOL_TOOLSET} - {"batch"}      # "batch" = batch_commands, refused when nested
+    assert without_tool == set(mod._WIRE_ALIASES), (sorted(without_tool ^ set(mod._WIRE_ALIASES)))
+    assert all(target in mod.TOOL_TOOLSET for target in mod._WIRE_ALIASES.values())
