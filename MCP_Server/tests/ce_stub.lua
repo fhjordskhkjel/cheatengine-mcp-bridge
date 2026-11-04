@@ -26,6 +26,10 @@ function debug_removeBreakpoint() end
 function debug_continueFromBreakpoint() CONTINUES = CONTINUES + 1 end
 print = function() end
 
+-- Cheat Engine's process environment, as seen by os.getenv (tests set CE_ENV.X).
+CE_ENV = {}
+os.getenv = function(name) return CE_ENV[name] end
+
 -- CE enum constants (vtByte, soExactValue, bptWrite, ...) get unique values.
 local nextConst = 1000
 setmetatable(_G, { __index = function(t, k)

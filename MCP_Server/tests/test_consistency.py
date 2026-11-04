@@ -50,8 +50,11 @@ def test_frame_limit_matches():
 
 
 def test_every_tool_is_in_a_toolset():
-    assert not re.search(r"^@mcp\.tool\(", PY, re.M), "register tools with @tool(\"<toolset>\"), not @mcp.tool()"
-    assert len(re.findall(r'^@tool\("\w+"\)$', PY, re.M)) >= 176
+    assert not re.search(r"^@mcp\.tool\(", PY, re.M), "register tools with @tool(\"<toolset>\", \"<access>\"), not @mcp.tool()"
+    decorators = re.findall(r"^@tool\(.*\)$", PY, re.M)
+    well_formed = [d for d in decorators if re.fullmatch(r'@tool\("\w+", "(read|analysis|write|exec)"\)', d)]
+    assert len(decorators) >= 176 and decorators == well_formed, \
+        "every tool needs @tool(\"<toolset>\", \"<access>\") with a literal access class"
 
 
 def test_claude_md_and_agents_md_in_sync():

@@ -3087,13 +3087,36 @@ end
 
 -- ============================================================================
 -- UNIT-20b: Shell Execution Handlers
--- NOTE: Security gate (CE_MCP_ALLOW_SHELL env var check) is enforced on the
---       Python side, before this Lua code is ever reached.
+-- Two opt-ins are required. The MCP server checks CE_MCP_ALLOW_SHELL in its own
+-- environment; this bridge checks its own, set where Cheat Engine runs:
+--   * CE_MCP_ALLOW_SHELL=1 in Cheat Engine's environment, or
+--   * `CE_MCP_ALLOW_SHELL = true` executed before loading this script.
+-- CE usually runs elevated (DBK/DBVM need it), so a shell command started here
+-- runs with CE's privileges; a client that reaches the pipe without going
+-- through the MCP server must not get that by default. The setting is captured
+-- once at load time, so setting the global later over the pipe does not
+-- enable it (evaluate_lua can still run anything, which is why CE_MCP_PROFILE
+-- keeps exec tools off the MCP surface unless "full").
 -- ============================================================================
+
+local SHELL_ALLOWED = (os and os.getenv and os.getenv("CE_MCP_ALLOW_SHELL") == "1")
+    or rawget(_G, "CE_MCP_ALLOW_SHELL") == true
+
+local function shellDenied()
+    if SHELL_ALLOWED then return nil end
+    return {
+        success = false,
+        error = "Shell tools are disabled inside Cheat Engine. Set CE_MCP_ALLOW_SHELL=1 in Cheat Engine's "
+            .. "environment, or run `CE_MCP_ALLOW_SHELL = true` before loading ce_mcp_bridge.lua, then reload the bridge.",
+        error_code = "PERMISSION_DENIED",
+    }
+end
 
 -- run_command: Wraps CE's runCommand(exepath, parameters, pathtoexecutein)
 -- Returns output string and exit code. SECURITY: arbitrary code execution.
 function cmd_run_command(params)
+    local denied = shellDenied()
+    if denied then return denied end
     local command = params.command
     local args = params.args or ""
 
@@ -3117,6 +3140,8 @@ end
 -- shell_execute: Wraps CE's shellExecute(command, parameters, folder, showcommand)
 -- SECURITY: arbitrary code execution via Windows ShellExecute.
 function cmd_shell_execute(params)
+    local denied = shellDenied()
+    if denied then return denied end
     local command = params.command
     local args = params.args or ""
     local verb = string.lower(params.verb or "open")
@@ -6422,6 +6447,7 @@ function StartMCPBridge()
     log("MCP Server Listening on: " .. PIPE_NAME)
     log("Architecture: Threaded I/O + Synchronized Execution")
     log("Cleanup: Zombie Prevention Active")
+    log("Shell tools (run_command/shell_execute): " .. (SHELL_ALLOWED and "ENABLED via CE_MCP_ALLOW_SHELL" or "disabled"))
     log("===========================================")
 end
 
