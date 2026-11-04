@@ -203,7 +203,7 @@ Use the `ping` tool to verify connectivity:
 
 ---
 
-## 176 MCP Tools Available
+## 214 MCP Tools Available
 
 ### Memory
 | Tool | Description |

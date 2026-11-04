@@ -4,7 +4,7 @@
 >
 > **Architecture Support**: All commands automatically adapt to 32-bit or 64-bit targets. Pointer operations use `readPointer()` for automatic size handling.
 >
-> **Version**: This reference covers the v12.1 tool surface (176 tools). Every failure carries an `error_code` from the enum in `CLAUDE.md`; see `CHANGELOG.md` for what changed in 12.1.0.
+> **Version**: This reference covers the v12.1 tool surface (214 tools). Every failure carries an `error_code` from the enum in `CLAUDE.md`; see `CHANGELOG.md` for what changed in 12.1.0.
 
 ---
 

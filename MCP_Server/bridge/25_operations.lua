@@ -1,5 +1,5 @@
 -- ============================================================================
--- Cheat Engine MCP Bridge :: 26_operations
+-- Cheat Engine MCP Bridge :: 25_operations
 -- Operations: bridge_status, read_struct, batch, async jobs (UNIT-25)
 -- Loaded in order by ../ce_mcp_bridge.lua with the shared namespace B as its
 -- argument. Imports below are the shared helpers this module uses; exports at
@@ -13,7 +13,6 @@ local PIPE_NAME = B.PIPE_NAME
 local USER_MODE_MAX = B.USER_MODE_MAX
 local VERSION = B.VERSION
 local bytesToString = B.bytesToString
-local commandHandlers = B.commandHandlers
 local commitFirstScan = B.commitFirstScan
 local commitNextScan = B.commitNextScan
 local log = B.log
@@ -746,20 +745,6 @@ function cmd_list_jobs(params)
 end
 
 -- >>> END UNIT-25 <<<
-
--- Dispatcher entries (the dispatcher table itself is built in 25_dispatcher)
-for name, handler in pairs({
-    bridge_status = cmd_bridge_status,
-    read_struct = cmd_read_struct,
-    batch = cmd_batch,
-    start_job = cmd_start_job,
-    get_job = cmd_get_job,
-    get_job_result = cmd_get_job_result,
-    cancel_job = cmd_cancel_job,
-    list_jobs = cmd_list_jobs,
-}) do commandHandlers[name] = handler end
-
-serverState.dispatch = commandHandlers   -- used by cmd_batch / cmd_bridge_status
 
 -- >>> exports
 B.countKeys = countKeys

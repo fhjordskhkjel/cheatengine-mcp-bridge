@@ -1,5 +1,5 @@
 -- ============================================================================
--- Cheat Engine MCP Bridge :: 27_analysis
+-- Cheat Engine MCP Bridge :: 26_analysis
 -- Analysis: PE/modules, address translation, RTTI, string refs, code caves, pointer paths, snapshots (UNIT-26)
 -- Loaded in order by ../ce_mcp_bridge.lua with the shared namespace B as its
 -- argument. Imports below are the shared helpers this module uses; exports at
@@ -12,7 +12,6 @@ local JOB_STARTERS = B.JOB_STARTERS
 local USER_MODE_MAX = B.USER_MODE_MAX
 local bytesToString = B.bytesToString
 local clampInt = B.clampInt
-local commandHandlers = B.commandHandlers
 local ensurePump = B.ensurePump
 local jobFinish = B.jobFinish
 local onScanDone = B.onScanDone
@@ -1484,24 +1483,6 @@ function cmd_diff_snapshots(params)
 end
 
 -- >>> END UNIT-26 <<<
-
--- Dispatcher entries (the dispatcher table itself is built in 25_dispatcher)
-for name, handler in pairs({
-    pe_info = cmd_pe_info,
-    pe_imports = cmd_pe_imports,
-    pe_exports = cmd_pe_exports,
-    pe_tls_callbacks = cmd_pe_tls_callbacks,
-    va_to_rva = cmd_va_to_rva,
-    rva_to_va = cmd_rva_to_va,
-    rebase_address = cmd_rebase_address,
-    export_names = cmd_export_names,
-    export_structures = cmd_export_structures,
-    import_names = cmd_import_names,
-    snapshot_region = cmd_snapshot_region,
-    list_snapshots = cmd_list_snapshots,
-    delete_snapshot = cmd_delete_snapshot,
-    diff_snapshots = cmd_diff_snapshots,
-}) do commandHandlers[name] = handler end
 
 -- >>> exports
 B.U26 = U26

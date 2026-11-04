@@ -1,5 +1,5 @@
 -- ============================================================================
--- Cheat Engine MCP Bridge :: 31_patch_journal
+-- Cheat Engine MCP Bridge :: 30_patch_journal
 -- Patch journal and undo (UNIT-31)
 -- Loaded in order by ../ce_mcp_bridge.lua with the shared namespace B as its
 -- argument. Imports below are the shared helpers this module uses; exports at
@@ -8,7 +8,6 @@
 local B = ...
 
 local U26 = B.U26
-local commandHandlers = B.commandHandlers
 local json = B.json
 local paginate = B.paginate
 local requireProcess = B.requireProcess
@@ -378,14 +377,5 @@ end
 U26.pjLoad()
 
 -- >>> END UNIT-31 <<<
-
--- Dispatcher entries (the dispatcher table itself is built in 25_dispatcher)
-for name, handler in pairs({
-    list_patches = cmd_list_patches,
-    undo_patch = cmd_undo_patch,
-    drop_patches = cmd_drop_patches,
-}) do commandHandlers[name] = handler end
-
-U26.pjWrap(commandHandlers)              -- journal the write tools (UNIT-31); batch() goes through this table too
 
 -- >>> exports

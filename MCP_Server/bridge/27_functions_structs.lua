@@ -1,5 +1,5 @@
 -- ============================================================================
--- Cheat Engine MCP Bridge :: 28_functions_structs
+-- Cheat Engine MCP Bridge :: 27_functions_structs
 -- Functions (.pdata) and struct recovery (UNIT-27)
 -- Loaded in order by ../ce_mcp_bridge.lua with the shared namespace B as its
 -- argument. Imports below are the shared helpers this module uses; exports at
@@ -9,7 +9,6 @@ local B = ...
 
 local U26 = B.U26
 local clampInt = B.clampInt
-local commandHandlers = B.commandHandlers
 local requireProcess = B.requireProcess
 local serverState = B.serverState
 
@@ -576,11 +575,5 @@ function cmd_recover_struct(params)
 end
 
 -- >>> END UNIT-27 <<<
-
--- Dispatcher entries (the dispatcher table itself is built in 25_dispatcher)
-for name, handler in pairs({
-    pe_functions = cmd_pe_functions,
-    recover_struct = cmd_recover_struct,
-}) do commandHandlers[name] = handler end
 
 -- >>> exports

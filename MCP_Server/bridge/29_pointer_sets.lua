@@ -1,5 +1,5 @@
 -- ============================================================================
--- Cheat Engine MCP Bridge :: 30_pointer_sets
+-- Cheat Engine MCP Bridge :: 29_pointer_sets
 -- Pointer path sets and saved state files (UNIT-30)
 -- Loaded in order by ../ce_mcp_bridge.lua with the shared namespace B as its
 -- argument. Imports below are the shared helpers this module uses; exports at
@@ -9,7 +9,6 @@ local B = ...
 
 local U26 = B.U26
 local clampInt = B.clampInt
-local commandHandlers = B.commandHandlers
 local json = B.json
 local paginate = B.paginate
 local requireProcess = B.requireProcess
@@ -489,13 +488,5 @@ end
 U26.psLoad()
 
 -- >>> END UNIT-30 <<<
-
--- Dispatcher entries (the dispatcher table itself is built in 25_dispatcher)
-for name, handler in pairs({
-    compare_pointer_paths = cmd_compare_pointer_paths,
-    list_pointer_sets = cmd_list_pointer_sets,
-    get_pointer_set = cmd_get_pointer_set,
-    drop_pointer_set = cmd_drop_pointer_set,
-}) do commandHandlers[name] = handler end
 
 -- >>> exports

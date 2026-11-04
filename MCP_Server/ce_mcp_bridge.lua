@@ -44,13 +44,13 @@ local MODULES = {
     "22_allocation",
     "23_process_lifecycle",
     "24_pointer_analysis",
-    "25_dispatcher",
-    "26_operations",
-    "27_analysis",
-    "28_functions_structs",
-    "29_xrefs",
-    "30_pointer_sets",
-    "31_patch_journal",
+    "25_operations",
+    "26_analysis",
+    "27_functions_structs",
+    "28_xrefs",
+    "29_pointer_sets",
+    "30_patch_journal",
+    "31_dispatcher",
 }
 
 local function bridgeDir()

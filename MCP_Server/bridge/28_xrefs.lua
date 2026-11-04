@@ -1,5 +1,5 @@
 -- ============================================================================
--- Cheat Engine MCP Bridge :: 29_xrefs
+-- Cheat Engine MCP Bridge :: 28_xrefs
 -- Cross-references (UNIT-28)
 -- Loaded in order by ../ce_mcp_bridge.lua with the shared namespace B as its
 -- argument. Imports below are the shared helpers this module uses; exports at

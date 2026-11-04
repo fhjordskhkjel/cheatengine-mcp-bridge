@@ -66,7 +66,7 @@ def test_all_toolsets_by_default(fake):
     s = Server(fake.port)
     try:
         names = {t["name"] for t in s.tools()}
-        assert len(names) == 176 and {"list_toolsets", "ping", "set_breakpoint"} <= names
+        assert len(names) == 214 and {"list_toolsets", "ping", "set_breakpoint"} <= names
     finally:
         s.close()
 
