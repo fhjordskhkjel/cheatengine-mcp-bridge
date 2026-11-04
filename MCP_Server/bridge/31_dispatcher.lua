@@ -1,5 +1,5 @@
 -- ============================================================================
--- Cheat Engine MCP Bridge :: 25_dispatcher
+-- Cheat Engine MCP Bridge :: 31_dispatcher
 -- Command dispatcher, JSON-RPC processing, pipe server, start/stop
 -- Loaded in order by ../ce_mcp_bridge.lua with the shared namespace B as its
 -- argument. Imports below are the shared helpers this module uses; exports at
@@ -13,6 +13,7 @@ local serverState = B.serverState
 local log = B.log
 local cleanupZombieState = B.cleanupZombieState
 local json = B.json
+local U26 = B.U26
 local SHELL_ALLOWED = B.SHELL_ALLOWED
 
 -- ============================================================================
@@ -35,6 +36,10 @@ local commandHandlers = {
     get_opened_process_handle = cmd_get_opened_process_handle,
     -- >>> END UNIT-07 <<<
     
+    -- >>> BEGIN UNIT-27 dispatcher entries <<<
+    get_halted_state = cmd_get_halted_state,
+    -- >>> END UNIT-27 <<<
+
     -- Memory Read
     read_memory = cmd_read_memory,
     read_bytes = cmd_read_memory,  -- Alias
@@ -252,7 +257,55 @@ local commandHandlers = {
     full_access            = cmd_full_access,
     allocate_kernel_memory = cmd_allocate_kernel_memory,
     -- >>> END UNIT-08 <<<
+
+    -- >>> BEGIN UNIT-25 <<<
+    bridge_status  = cmd_bridge_status,
+    read_struct    = cmd_read_struct,
+    batch          = cmd_batch,
+    start_job      = cmd_start_job,
+    get_job        = cmd_get_job,
+    get_job_result = cmd_get_job_result,
+    cancel_job     = cmd_cancel_job,
+    list_jobs      = cmd_list_jobs,
+    -- >>> END UNIT-25 <<<
+
+    -- >>> BEGIN UNIT-26 <<<
+    pe_info             = cmd_pe_info,
+    pe_imports          = cmd_pe_imports,
+    pe_exports          = cmd_pe_exports,
+    pe_tls_callbacks    = cmd_pe_tls_callbacks,
+    va_to_rva           = cmd_va_to_rva,
+    rva_to_va           = cmd_rva_to_va,
+    rebase_address      = cmd_rebase_address,
+    export_names        = cmd_export_names,
+    export_structures   = cmd_export_structures,
+    import_names        = cmd_import_names,
+    snapshot_region     = cmd_snapshot_region,
+    list_snapshots      = cmd_list_snapshots,
+    delete_snapshot     = cmd_delete_snapshot,
+    diff_snapshots      = cmd_diff_snapshots,
+    -- >>> END UNIT-26 <<<
+
+    -- >>> BEGIN UNIT-27 <<<
+    pe_functions        = cmd_pe_functions,
+    recover_struct      = cmd_recover_struct,
+    -- >>> END UNIT-27 <<<
+
+    -- >>> BEGIN UNIT-30 <<<
+    compare_pointer_paths = cmd_compare_pointer_paths,
+    list_pointer_sets   = cmd_list_pointer_sets,
+    get_pointer_set     = cmd_get_pointer_set,
+    drop_pointer_set    = cmd_drop_pointer_set,
+    -- >>> END UNIT-30 <<<
+
+    -- >>> BEGIN UNIT-31 <<<
+    list_patches        = cmd_list_patches,
+    undo_patch          = cmd_undo_patch,
+    drop_patches          = cmd_drop_patches,
+    -- >>> END UNIT-31 <<<
 }
+serverState.dispatch = commandHandlers   -- used by cmd_batch / cmd_bridge_status
+U26.pjWrap(commandHandlers)              -- journal the write tools (UNIT-31); batch() goes through this table too
 
 -- ============================================================================
 -- MAIN COMMAND PROCESSOR
@@ -283,8 +336,18 @@ local function executeCommand(jsonRequest)
         return rpcError(-32601, "Method not found: " .. tostring(method), id)
     end
 
+    local t0 = os.clock()
     local ok2, result = pcall(handler, params)
+    local stats = serverState.stats
+    stats.requests = stats.requests + 1
+    stats.last_method = method
+    stats.last_ms = math.floor((os.clock() - t0) * 1000)
+    if stats.last_ms > (stats.slowest_ms or 0) then
+        stats.slowest_ms, stats.slowest_method = stats.last_ms, method
+    end
     if not ok2 then
+        stats.errors = stats.errors + 1
+        stats.last_error = tostring(result)
         return rpcError(-32603, "Internal error: " .. tostring(result), id)
     end
 

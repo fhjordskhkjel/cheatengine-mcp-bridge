@@ -22,7 +22,11 @@ local serverState = {
     breakpoints = {},
     breakpoint_hits = {},
     hw_bp_slots = {},      -- Hardware breakpoint slots (max 4)
-    active_watches = {}    -- DBVM watch IDs for hypervisor-level tracing
+    active_watches = {},   -- DBVM watch IDs for hypervisor-level tracing
+    started_at = os.time(),
+    stats = { requests = 0, errors = 0 },   -- updated by executeCommand, reported by bridge_status
+    jobs = {},             -- async jobs (UNIT-25)
+    job_next_id = 1
 }
 
 -- ============================================================================
@@ -407,9 +411,17 @@ end
 -- release the mappings on bridge stop/restart.
 local mappedMemoryMDL = {}
 
+-- Resources owned by later modules register their cleanup here instead of editing cleanupZombieState.
+--   early: runs first. A thread left stopped by a break-and-inspect breakpoint must be resumed before anything is torn down.
+--   jobs:  runs before the scan objects are destroyed: a running next_scan job shares serverState.scan_memscan,
+--          which step 3 destroys (it must never be destroyed twice).
+local cleanupHooks = { early = {}, jobs = {} }
+
 local function cleanupZombieState()
     log("Cleaning up zombie resources...")
     local cleaned = { breakpoints = 0, dbvm_watches = 0, scans = 0 }
+
+    for _, hook in ipairs(cleanupHooks.early) do pcall(hook) end
     
     -- 1. Remove all Hardware Breakpoints managed by us
     if serverState.breakpoints then
@@ -430,6 +442,8 @@ local function cleanupZombieState()
             end
         end
     end
+
+    for _, hook in ipairs(cleanupHooks.jobs) do pcall(hook) end
 
     -- 3. Cleanup Scan memory objects
     if serverState.scan_memscan then
@@ -505,4 +519,5 @@ B.requireProcess = requireProcess
 B.findModulesViaMZScan = findModulesViaMZScan
 B.findFunctionPrologue = findFunctionPrologue
 B.mappedMemoryMDL = mappedMemoryMDL
+B.cleanupHooks = cleanupHooks
 B.cleanupZombieState = cleanupZombieState

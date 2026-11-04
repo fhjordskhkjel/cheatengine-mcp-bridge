@@ -66,7 +66,7 @@ def test_claude_md_and_agents_md_in_sync():
 
 
 ERROR_CODES = {"NO_PROCESS", "INVALID_ADDRESS", "INVALID_PARAMS", "CE_API_UNAVAILABLE", "DBVM_NOT_LOADED",
-               "DBK_NOT_LOADED", "PERMISSION_DENIED", "NOT_FOUND", "OUT_OF_RESOURCES", "INTERNAL_ERROR"}
+               "DBK_NOT_LOADED", "PERMISSION_DENIED", "NOT_FOUND", "OUT_OF_RESOURCES", "BUSY", "INTERNAL_ERROR"}
 
 
 def _failure_tables(src):

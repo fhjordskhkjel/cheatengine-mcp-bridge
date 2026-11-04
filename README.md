@@ -203,19 +203,19 @@ Use the `ping` tool to verify connectivity:
 
 ---
 
-## 176 MCP Tools Available
+## 214 MCP Tools Available
 
 ### Memory
 | Tool | Description |
 |------|-------------|
-| `read_memory`, `read_integer`, `read_string` | Read any data type |
+| `read_memory`, `read_integer`, `read_string` | Read any data type (`read_memory` returns compact hex by default, or base64 / an int array) |
 | `read_pointer_chain` | Follow `[[base+0x10]+0x20]` paths |
 | `scan_all`, `aob_scan` | Find values and byte patterns |
 
 ### Analysis
 | Tool | Description |
 |------|-------------|
-| `disassemble`, `analyze_function` | Code analysis |
+| `disassemble`, `analyze_function`, `find_function_boundaries` | Code analysis (on x64 the exact function bounds come from the exception table) |
 | `dissect_structure` | Auto-detect fields and types |
 | `get_rtti_classname` | Identify C++ object types |
 | `find_references`, `find_call_references` | Cross-references |
@@ -223,8 +223,34 @@ Use the `ping` tool to verify connectivity:
 ### Debugging
 | Tool | Description |
 |------|-------------|
-| `set_breakpoint`, `set_data_breakpoint` | Hardware breakpoints |
+| `set_breakpoint`, `set_data_breakpoint` | Hardware breakpoints with conditions (`condition="RAX == 5"`), `stop_after_hits`, and break-and-inspect (`mode="break"`: the thread stays stopped, with a watchdog that resumes it) |
+| `get_halted_state`, `debug_continue` | Inspect a thread stopped by a breakpoint, then run or single-step it |
 | `start_dbvm_watch` | Ring -1 invisible tracing |
+
+### Operations and Long-Running Jobs
+| Tool | Description |
+|------|-------------|
+| `bridge_status` | Health report: version, uptime, attached process, hardware-slot usage, job counts, request statistics, warnings. Works even when CE is unreachable |
+| `read_struct` | Many typed fields (ints, floats, pointers, strings) from ONE memory read |
+| `batch_commands` | Several tools in one round trip (every request is checked against the registered tools and the active profile first) |
+| `start_job`, `get_job`, `get_job_result`, `wait_for_job`, `cancel_job`, `list_jobs` | Background jobs for scans and analyses: Cheat Engine stays responsive and the MCP call cannot time out |
+
+### Binary Analysis (PE, RTTI, Cross-References)
+| Tool | Description |
+|------|-------------|
+| `pe_info`, `pe_imports`, `pe_exports`, `pe_tls_callbacks`, `pe_functions` | Parse a loaded module's PE headers from memory: sections, imports/exports, TLS callbacks, the x64 function table (`.pdata`) |
+| `va_to_rva`, `rva_to_va`, `rebase_address` | Translate addresses between Cheat Engine and IDA |
+| `export_names`, `export_structures`, `import_names` | Exchange names and class layouts with IDA (ready-made IDAPython / `declare_c_type` output) |
+| `rtti_scan_module`, `recover_struct` | Find MSVC classes by their RTTI; recover a class layout from live instances |
+| `find_xrefs`, `find_string_refs`, `find_code_caves` | Calls, jumps, rip-relative operands, pointers and RVAs that reference an address; users of a string; free space for patches |
+| `find_pointer_path` | Reverse pointer search: static `[[module+rva]+o1]+o2` chains that reach a heap address. Holders that lie close together share one memory scan. `save_as` keeps the chains in a named set for the two-run comparison |
+| `compare_pointer_paths`, `list_pointer_sets`, `get_pointer_set`, `drop_pointer_set` | **Two-run pointer path comparison**: after the target restarts and you have found the same value again, `compare_pointer_paths(target=<new address>, name=<set>)` re-resolves every stored chain from its `module+RVA` base and keeps the ones that still land on it (a chain with `runs=3` survived three restarts). Near misses come back with a corrected last offset. Sets are saved to a file and survive reloads of the script and CE restarts |
+| `snapshot_region`, `diff_snapshots`, `list_snapshots`, `delete_snapshot` | The "unknown value" workflow without scans: snapshot a region, then list the units that changed (or stayed the same) between snapshots |
+
+### Patch Journal
+| Tool | Description |
+|------|-------------|
+| `list_patches`, `undo_patch`, `drop_patches` | Every write made through `write_memory`, `write_integer`, `write_string`, `copy_memory` and `auto_assemble` is recorded with the bytes it replaced (the write's reply carries its `patch_id`). `undo_patch(id)` puts them back (a script patch runs its `[DISABLE]` section), `undo_patch(all=true)` unwinds everything newest first, and an undo is refused when the bytes changed since the patch unless `force=true`. The journal is saved to a file: after a reload of the bridge byte patches stay undoable while the same process is attached |
 
 ### Process Lifecycle
 | Tool | Description |
@@ -352,6 +378,7 @@ Cheat Engine usually runs elevated, so a shell command started by the bridge run
 | `CE_MCP_PROFILE` | `full` | Which access classes get registered: `readonly` (passive: reads, scans, disassembly, structures, symbols; never touches the target or the host), `standard` (adds memory writes, breakpoints, debugger control, files, input), `full` (adds arbitrary code execution: Lua, auto-assembler, injection, shell). See [Security Model](#security-model). |
 | `CE_MCP_ALLOW_SHELL` | *unset* | Set to `1` to enable `run_command` / `shell_execute`. **Arbitrary code execution risk.** Needs the CE-side opt-in too, and `CE_MCP_PROFILE=full`. |
 | `CE_MCP_AUDIT_LOG` | *unset* | Path of a JSON-lines file that records every command sent to Cheat Engine (time, method, parameters, outcome, error code, duration). |
+| `CE_MCP_STATE_DIR` | *see text* | Read by the **Lua bridge** (set it in Cheat Engine's environment, or as a Lua global before loading the script): folder for the saved pointer sets and patch journal. Default: the folder of `ce_mcp_bridge.lua`, else `%LOCALAPPDATA%`, else the temp folder; `off` disables saving. |
 | `CE_MCP_TOOLSETS` | `all` | Comma-separated tool groups to register: `process` (always on), `memory`, `scan`, `analysis`, `debug`, `kernel`, `scripting`, `table`, `gui`, `system`. All 176 tool schemas cost a lot of context on every turn; e.g. `memory,scan,analysis,debug` keeps the reverse-engineering core (~100 tools). The `list_toolsets` tool shows what each group contains and what is disabled. |
 
 ---
@@ -385,13 +412,13 @@ CLAUDE.md / AGENTS.md                   # Agent guidance (Claude Code / Codex; k
 MCP_Server/
 ├── mcp_cheatengine.py                  # Python MCP server (FastMCP)
 ├── ce_mcp_bridge.lua                   # Cheat Engine bridge loader (load this in CE)
-├── bridge/                             # The bridge: 26 modules (core, codec, tool areas, dispatcher)
+├── bridge/                             # The bridge: 32 modules (core, codec, tool areas, operations/analysis units, dispatcher)
 ├── ce_tcp_relay.py                     # Optional TCP-to-named-pipe relay (WSL, containers, other hosts)
 ├── requirements*.txt                   # Runtime, TCP-only and dev/test dependencies
 ├── test_mcp.py                         # Live integration test (needs CE)
 ├── test_json_codec.lua                 # Offline Lua tests: wire codec
 ├── test_pointer_parse.lua              # Offline Lua tests: pointer operand parser
-└── tests/                              # Offline pytest suite (no CE needed)
+└── tests/                              # Offline pytest suite (no CE needed); tests/behaviour/ = suites that run the real bridge modules in Lua 5.3
 
 AI_Context/
 ├── MCP_Bridge_Command_Reference.md     # Per-command reference
@@ -408,6 +435,16 @@ AI_Context/
 ```bash
 pip install -r MCP_Server/requirements-dev.txt
 python -m pytest
+```
+
+**Behaviour suites** (part of `pytest`; also runnable on their own, with `--real` for real-DLL oracles and `--mutation` to check that they catch breakages):
+```bash
+python MCP_Server/tests/behaviour/run_all.py
+```
+
+**Live smoke test of the newer tools** (Cheat Engine running with the bridge loaded; spawns and attaches its own throwaway target):
+```bash
+python MCP_Server/tests/behaviour/live_smoke.py
 ```
 
 **Live integration test** (Cheat Engine running, bridge loaded, a process attached):

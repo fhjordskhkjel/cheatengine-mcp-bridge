@@ -9,6 +9,7 @@ local B = ...
 
 local toHex = B.toHex
 local paginate = B.paginate
+local serverState = B.serverState
 
 -- ============================================================================
 -- COMMAND HANDLERS - HIGH-LEVEL ANALYSIS TOOLS
@@ -90,6 +91,7 @@ function cmd_auto_assemble(params)
     local success, disableInfo = autoAssemble(script)
     
     if success then
+        serverState.aa_last = { script = script, info = disableInfo }     -- picked up by the patch journal (UNIT-31)
         local result = {
             success = true,
             executed = true

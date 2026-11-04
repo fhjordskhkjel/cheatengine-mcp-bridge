@@ -1,6 +1,9 @@
 -- Minimal Cheat Engine API stubs so ce_mcp_bridge.lua can be loaded and its
 -- handlers exercised offline (no CE, no target process). Tests drive the
 -- MEM / MEM_BYTES tables and inspect BP_CALLBACKS / CONTINUES.
+-- The pointer sets and the patch journal are saved to a state folder; the offline tests must never write into the repo.
+CE_MCP_STATE_DIR = "off"
+
 MEM = {}          -- MEM[addr] (float/double), MEM["i"..addr] (dword), MEM["q"..addr] (qword)
 MEM_BYTES = {}    -- MEM_BYTES[addr] = { byte, byte, ... }
 BP_CALLBACKS = {} -- BP_CALLBACKS[addr] = hit callback passed to debug_setBreakpoint

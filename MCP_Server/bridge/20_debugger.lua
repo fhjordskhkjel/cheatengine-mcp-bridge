@@ -7,6 +7,8 @@
 -- ============================================================================
 local B = ...
 
+local serverState = B.serverState
+
 -- >>> BEGIN UNIT-10 Debugger Control <<<
 -- ============================================================================
 -- COMMAND HANDLERS - DEBUGGER CONTROL (Unit 10)
@@ -129,6 +131,16 @@ function cmd_debug_continue(params)
     end
     local ok, err = pcall(debug_continueFromBreakpoint, ceMethod)
     if not ok then return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" } end
+    local h = serverState.halted
+    if h then
+        if method == "run" then
+            serverState.halted = nil
+            serverState.last_halt = { breakpoint = h.id, reason = "resumed", halted_seconds = os.clock() - h.since, steps = h.steps }
+        else    -- stepping: the thread is still "ours"; the watchdog window restarts
+            h.stepping, h.step_started, h.steps = true, os.clock(), (h.steps or 0) + 1
+            h.deadline = math.min(os.clock() + h.timeout_ms / 1000, h.hard_deadline)
+        end
+    end
     return { success = true }
 end
 

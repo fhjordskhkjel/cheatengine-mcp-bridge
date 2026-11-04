@@ -86,6 +86,21 @@ function cmd_find_function_boundaries(params)
 
     local is64 = targetIs64Bit()
 
+    -- x64 modules: the exception table gives the exact start and end (see pdataFunctionBoundaries, UNIT-27)
+    if type(pdataFunctionBoundaries) == "function" then
+        local okPd, pd = pcall(pdataFunctionBoundaries, addr)
+        if okPd and pd then
+            return {
+                success = true, found = true, query_address = toHex(addr),
+                function_start = toHex(pd.start), function_end = toHex(pd.finish - 1), function_size = pd.finish - pd.start,
+                method = "pdata", exact = true, fragment = pd.fragment or nil,
+                exception_handler = pd.handler_rva and toHex(pd.module.base + pd.handler_rva) or nil,
+                module = pd.module.name, expression = pd.module.name .. "+" .. string.format("0x%X", pd.start - pd.module.base),
+                arch = "x64"
+            }
+        end
+    end
+
     local funcStart, prologueType = findFunctionPrologue(addr, maxSearch)
 
     -- Search forwards for return instruction
@@ -110,6 +125,7 @@ function cmd_find_function_boundaries(params)
         function_end = funcEnd and toHex(funcEnd) or nil,
         function_size = (funcStart and funcEnd) and (funcEnd - funcStart + 1) or nil,
         prologue_type = prologueType,
+        method = "heuristic",
         arch = is64 and "x64" or "x86",
         note = not found and "No standard function prologue found within search range" or nil
     }
@@ -123,10 +139,20 @@ function cmd_analyze_function(params)
     
     local is64 = targetIs64Bit()
 
-    local funcStart, prologueType = findFunctionPrologue(addr, 4096)
+    local pd
+    if type(pdataFunctionBoundaries) == "function" then
+        local okPd, res = pcall(pdataFunctionBoundaries, addr)
+        if okPd then pd = res end
+    end
+    local funcStart, prologueType
+    if pd then
+        funcStart, prologueType = pd.start, "pdata"
+    else
+        funcStart, prologueType = findFunctionPrologue(addr, 4096)
+    end
 
-    if not funcStart then 
-        return { 
+    if not funcStart then
+return { 
             success = false, 
             error = "Could not find function start",
             arch = is64 and "x64" or "x86",
@@ -140,12 +166,13 @@ function cmd_analyze_function(params)
     local funcEnd = nil
     local currentAddr = funcStart
     
-    while currentAddr < funcStart + 0x2000 do
+    local limitAddr = pd and pd.finish or (funcStart + 0x2000)
+    while currentAddr < limitAddr do
         local instSize = getInstructionSize(currentAddr)
         if not instSize or instSize == 0 then break end
         
         local b1 = readBytes(currentAddr, 1, false)
-        if b1 == 0xC3 or b1 == 0xC2 then
+        if (b1 == 0xC3 or b1 == 0xC2) and not pd then
             funcEnd = currentAddr
             break
         end
@@ -180,11 +207,15 @@ function cmd_analyze_function(params)
         currentAddr = currentAddr + instSize
     end
     
+    if pd then funcEnd = pd.finish - 1 end
+
     return {
         success = true,
         function_start = toHex(funcStart),
         function_end = funcEnd and toHex(funcEnd) or nil,
         prologue_type = prologueType,
+        method = pd and "pdata" or "heuristic",
+        exact = pd and true or nil,
         arch = is64 and "x64" or "x86",
         call_count = #calls,
         calls = calls

@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Saved by the bridge (pointer sets, patch journal); see CE_MCP_STATE_DIR
+ce_mcp_pointer_sets.json
+ce_mcp_pointer_sets.json.tmp
+ce_mcp_patch_journal.jsonl
+ce_mcp_patch_journal.jsonl.tmp

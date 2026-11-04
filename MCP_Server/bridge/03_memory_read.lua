@@ -13,26 +13,64 @@ local toHex = B.toHex
 -- COMMAND HANDLERS - MEMORY READ
 -- ============================================================================
 
+-- Byte-table helpers shared by read_memory / read_struct / jobs.
+local function bytesToString(bytes, first, last)
+    first = first or 1
+    last = last or #bytes
+    local parts = {}
+    for i = first, last, 4096 do
+        parts[#parts + 1] = string.char(table.unpack(bytes, i, math.min(i + 4095, last)))
+    end
+    return table.concat(parts)
+end
+
+local B64_CHARS = {}
+do
+    local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    for i = 1, 64 do B64_CHARS[i - 1] = alphabet:sub(i, i) end
+end
+
+local function base64Encode(s)
+    local out = {}
+    for i = 1, #s, 3 do
+        local a, b, c = s:byte(i, i + 2)
+        local n = (a << 16) | ((b or 0) << 8) | (c or 0)
+        out[#out + 1] = B64_CHARS[(n >> 18) & 63] .. B64_CHARS[(n >> 12) & 63]
+            .. (b and B64_CHARS[(n >> 6) & 63] or "=") .. (c and B64_CHARS[n & 63] or "=")
+    end
+    return table.concat(out)
+end
+
+-- format: "both" (default, legacy: hex string + integer array), "hex" (string only),
+-- "base64", "array" (integer array only). Large reads are 2-3x smaller with "hex"/"base64".
 function cmd_read_memory(params)
     local addr = params.address
     local size = math.max(1, math.min(params.size or 256, 1048576))  -- 1 MB max
-    
+    local fmt = params.format or "both"
+    if fmt ~= "both" and fmt ~= "hex" and fmt ~= "base64" and fmt ~= "array" then
+        return { success = false, error = "Unknown format '" .. tostring(fmt) .. "'. Valid: hex, base64, array, both", error_code = "INVALID_PARAMS" }
+    end
+
     if type(addr) == "string" then addr = getAddressSafe(addr) end
     if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
-    
+
     local bytes = readBytes(addr, size, true)
     if not bytes then return { success = false, error = "Failed to read at " .. toHex(addr), error_code = "INVALID_ADDRESS" } end
-    
-    local hex = {}
-    for i, b in ipairs(bytes) do hex[i] = string.format("%02X", b) end
-    
-    return { 
-        success = true, 
-        address = toHex(addr), 
-        size = #bytes, 
-        data = table.concat(hex, " "),
-        bytes = bytes
-    }
+
+    local result = { success = true, address = toHex(addr), size = #bytes }
+    if fmt == "both" or fmt == "hex" then
+        local hex = {}
+        for i, b in ipairs(bytes) do hex[i] = string.format("%02X", b) end
+        result.data = table.concat(hex, " ")
+    end
+    if fmt == "base64" then
+        result.base64 = base64Encode(bytesToString(bytes))
+    end
+    if fmt == "both" or fmt == "array" then
+        result.bytes = bytes
+    end
+    if fmt ~= "both" then result.format = fmt end
+    return result
 end
 
 function cmd_read_integer(params)
@@ -205,3 +243,8 @@ function cmd_read_pointer(params)
         path = path 
     }
 end
+
+-- >>> exports
+B.bytesToString = bytesToString
+B.base64Encode = base64Encode
+B.B64_CHARS = B64_CHARS
