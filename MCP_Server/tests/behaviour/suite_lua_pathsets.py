@@ -283,7 +283,7 @@ eq("persist: both chains saved", r.hits == 2 and r.saved_as == "hp", true)
 cmd_compare_pointer_paths({ target = 0x2A000010, chains = CHAINS, save_as = "gone" })
 eq("persist: drop_pointer_set", cmd_drop_pointer_set({ name = "gone" }).deleted, 1)
 local l = cmd_list_pointer_sets({})
-eq("persist: list_pointer_sets says where the sets are saved", l.saved_to == STATE_DIR .. "\\ce_mcp_pointer_sets.json" and l.save_error == nil, true)
+eq("persist: list_pointer_sets says where the sets are saved", l.saved_to == STATE_DIR .. (STATE_DIR:find("\\", 1, true) and "\\" or "/") .. "ce_mcp_pointer_sets.json" and l.save_error == nil, true)
 local text = slurp(l.saved_to) or ""
 eq("persist: the file holds the set, not the dropped one", text:find('"hp"', 1, true) ~= nil and text:find('"gone"', 1, true) == nil, true)
 eq("persist: no temporary copy is left behind", slurp(l.saved_to .. ".tmp"), nil)

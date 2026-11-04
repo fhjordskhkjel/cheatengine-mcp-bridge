@@ -224,7 +224,7 @@ SETUP = TESTS[:TESTS.index("-- ===================== recording =================
 process = "game.exe"
 local function slurp(path) local f = io.open(path, "rb"); if not f then return nil end local t = f:read("a"); f:close(); return t end
 local function lines(path) local n = 0; for _ in (slurp(path) or ""):gmatch("[^\n]+") do n = n + 1 end return n end
-local JOURNAL = STATE_DIR .. "\\ce_mcp_patch_journal.jsonl"
+local JOURNAL = STATE_DIR .. (STATE_DIR:find("\\", 1, true) and "\\" or "/") .. "ce_mcp_patch_journal.jsonl"
 """
 
 FIRST = SETUP + r"""

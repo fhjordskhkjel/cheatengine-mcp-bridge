@@ -28,6 +28,12 @@ serverState.path_sets = {}
 -- the command: it is reported as save_error by list_pointer_sets / list_patches.
 U26.PS_FILE, U26.PJ_FILE = "ce_mcp_pointer_sets.json", "ce_mcp_patch_journal.jsonl"
 
+-- Windows paths use a backslash; a folder written with "/" (or a test on another OS) keeps its own separator.
+function U26.stSep(dir)
+    if dir:find("\\", 1, true) or not dir:find("/", 1, true) then return "\\" end
+    return "/"
+end
+
 function U26.stDir()
     if serverState.state_dir ~= nil then return serverState.state_dir or nil end
     serverState.state_dir = false
@@ -46,7 +52,7 @@ function U26.stDir()
     for _, d in ipairs(cands) do
         if type(d) == "string" and d ~= "" then
             d = d:gsub("[\\/]+$", "")
-            local probe = d .. "\\ce_mcp_state.probe"
+            local probe = d .. U26.stSep(d) .. "ce_mcp_state.probe"
             local f = io.open(probe, "wb")
             if f then
                 f:close()
@@ -62,7 +68,7 @@ end
 
 function U26.stPath(file)
     local d = U26.stDir()
-    return d and (d .. "\\" .. file) or nil
+    return d and (d .. U26.stSep(d) .. file) or nil
 end
 
 -- Replace a state file. The new content goes to a .tmp copy first, so a crash never leaves half a file behind.
