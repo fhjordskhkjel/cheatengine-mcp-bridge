@@ -91,7 +91,7 @@ Two files are the source of truth — there's no codegen, so you must edit both:
 ### Return shape
 - **Success:** `{ success: true, <fields> }`
 - **Error:** `{ success: false, error: "<human msg>", error_code: "<UPPER_SNAKE>" }`
-- **Error code enum:** `NO_PROCESS`, `INVALID_ADDRESS`, `INVALID_PARAMS`, `CE_API_UNAVAILABLE`, `DBVM_NOT_LOADED`, `DBK_NOT_LOADED`, `PERMISSION_DENIED`, `NOT_FOUND`, `OUT_OF_RESOURCES`, `INTERNAL_ERROR`.
+- **Error code enum:** `NO_PROCESS`, `INVALID_ADDRESS`, `INVALID_PARAMS`, `CE_API_UNAVAILABLE`, `DBVM_NOT_LOADED`, `DBK_NOT_LOADED`, `PERMISSION_DENIED`, `NOT_FOUND`, `OUT_OF_RESOURCES`, `BUSY`, `INTERNAL_ERROR`.
 
 ### Addresses
 Output: always hex string via `toHex()` (e.g. `"0x140001000"`). Input: accept string or integer.

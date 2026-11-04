@@ -38,22 +38,33 @@ function cmd_aob_scan(params)
     return { success = true, count = #addresses, pattern = pattern, addresses = addresses }
 end
 
-function cmd_scan_all(params)
-    local value = params.value
+local USER_MODE_MAX = 0x7FFFFFFFFFFFFFFF
+
+-- An async scan job owns the shared memscan until it finishes.
+local function scanBusyError()
+    if serverState.scan_job_id then
+        return { success = false, error = "Scan job " .. serverState.scan_job_id .. " is still running; poll get_job or cancel_job first.", error_code = "BUSY" }
+    end
+    return nil
+end
+
+-- Validates scan_all parameters. Shared by cmd_scan_all and the scan_all job so both
+-- behave identically. Returns args table, or nil + error reply.
+local function prepareFirstScan(params)
     local vtype = params.type or "dword"
 
     local scanOpt = resolveScanOption(params.scan_option or "exact")
     if not scanOpt then
-        return { success = false, error = "Unknown scan_option '" .. tostring(params.scan_option) .. "'. Valid: " .. SCAN_OPTION_NAMES, error_code = "INVALID_PARAMS" }
+        return nil, { success = false, error = "Unknown scan_option '" .. tostring(params.scan_option) .. "'. Valid: " .. SCAN_OPTION_NAMES, error_code = "INVALID_PARAMS" }
     end
     if scanOpt ~= soExactValue and scanOpt ~= soUnknownValue and scanOpt ~= soValueBetween
        and scanOpt ~= soBiggerThan and scanOpt ~= soSmallerThan then
-        return { success = false, error = "scan_option '" .. tostring(params.scan_option) .. "' is only valid for next_scan. First scan supports: exact, unknown, between, bigger, smaller", error_code = "INVALID_PARAMS" }
+        return nil, { success = false, error = "scan_option '" .. tostring(params.scan_option) .. "' is only valid for next_scan. First scan supports: exact, unknown, between, bigger, smaller", error_code = "INVALID_PARAMS" }
     end
 
-    local input1, input2, inputErr = resolveScanInputs(scanOpt, value, params.value2)
+    local input1, input2, inputErr = resolveScanInputs(scanOpt, params.value, params.value2)
     if inputErr then
-        return { success = false, error = inputErr, error_code = "INVALID_PARAMS" }
+        return nil, { success = false, error = inputErr, error_code = "INVALID_PARAMS" }
     end
 
     local varType = vtDword
@@ -64,18 +75,17 @@ function cmd_scan_all(params)
     elseif vtype == "double" then varType = vtDouble
     elseif vtype == "string" then varType = vtString end
 
-    local ms = createMemScan()
-
     -- Use specific protection flags if provided (defaults to +W-C from Python)
-    -- CRITICAL: Limit scan to User Mode space (0x7FFFFFFFFFFFFFFF) to prevent BSODs in Kernel/Guard regions
-    local protect = params.protection or "+W-C"
-    ms.firstScan(scanOpt, varType, rtRounded, input1, input2, 0, 0x7FFFFFFFFFFFFFFF, protect, fsmNotAligned, "1", false, false, false, false)
-    ms.waitTillDone()
+    return { scanOpt = scanOpt, varType = varType, input1 = input1, input2 = input2,
+             protect = params.protection or "+W-C" }
+end
 
+-- Makes a finished first-scan memscan the active scan session; returns the result count.
+local function commitFirstScan(ms, scanOpt)
     local fl = createFoundList(ms)
     fl.initialize()
     local count = fl.getCount()
-    
+
     if serverState.scan_foundlist then
         pcall(function() serverState.scan_foundlist.destroy() end)
         serverState.scan_foundlist = nil
@@ -93,11 +103,27 @@ function cmd_scan_all(params)
     if scanOpt == soUnknownValue then
         count = resolveScanResultCount(ms, count)
     end
+    return count
+end
 
-    return { success = true, count = count }
+function cmd_scan_all(params)
+    local busy = scanBusyError()
+    if busy then return busy end
+    local args, err = prepareFirstScan(params)
+    if err then return err end
+
+    local ms = createMemScan()
+
+    -- CRITICAL: Limit scan to User Mode space (0x7FFFFFFFFFFFFFFF) to prevent BSODs in Kernel/Guard regions
+    ms.firstScan(args.scanOpt, args.varType, rtRounded, args.input1, args.input2, 0, USER_MODE_MAX, args.protect, fsmNotAligned, "1", false, false, false, false)
+    ms.waitTillDone()
+
+    return { success = true, count = commitFirstScan(ms, args.scanOpt) }
 end
 
 function cmd_get_scan_results(params)
+    local busy = scanBusyError()
+    if busy then return busy end
     -- limit: preferred param; max: backward-compat alias
     local limit = params.limit or params.max or 100
     limit = math.max(1, math.min(limit, 10000))
@@ -153,32 +179,33 @@ end
 -- COMMAND HANDLERS - NEXT SCAN & WRITE MEMORY (Added by MCP Enhancement)
 -- ============================================================================
 
-function cmd_next_scan(params)
-    local value = params.value
+-- Validates next_scan parameters (shared with the next_scan job).
+local function prepareNextScan(params)
     -- scan_option is the v12 name; scan_type is kept as a backward-compat alias
     local scanType = params.scan_option or params.scan_type or "exact"
 
     if not serverState.scan_memscan then
-        return { success = false, error = "No previous scan. Run scan_all first.", error_code = "NOT_FOUND" }
+        return nil, { success = false, error = "No previous scan. Run scan_all first.", error_code = "NOT_FOUND" }
     end
 
-    local ms = serverState.scan_memscan
     local scanOpt = resolveScanOption(scanType)
     if not scanOpt then
-        return { success = false, error = "Unknown scan_option '" .. tostring(scanType) .. "'. Valid: " .. SCAN_OPTION_NAMES, error_code = "INVALID_PARAMS" }
+        return nil, { success = false, error = "Unknown scan_option '" .. tostring(scanType) .. "'. Valid: " .. SCAN_OPTION_NAMES, error_code = "INVALID_PARAMS" }
     end
     if scanOpt == soUnknownValue then
-        return { success = false, error = "scan_option 'unknown' is only valid for scan_all", error_code = "INVALID_PARAMS" }
+        return nil, { success = false, error = "scan_option 'unknown' is only valid for scan_all", error_code = "INVALID_PARAMS" }
     end
 
-    local input1, input2, inputErr = resolveScanInputs(scanOpt, value, params.value2)
+    local input1, input2, inputErr = resolveScanInputs(scanOpt, params.value, params.value2)
     if inputErr then
-        return { success = false, error = inputErr, error_code = "INVALID_PARAMS" }
+        return nil, { success = false, error = inputErr, error_code = "INVALID_PARAMS" }
     end
 
-    ms.nextScan(scanOpt, rtRounded, input1, input2, false, false, false, false, false)
-    ms.waitTillDone()
+    return { ms = serverState.scan_memscan, scanOpt = scanOpt, input1 = input1, input2 = input2 }
+end
 
+-- Replaces the foundlist with the results of the finished next scan; returns the count.
+local function commitNextScan(ms)
     if serverState.scan_foundlist then
         serverState.scan_foundlist.destroy()
     end
@@ -186,8 +213,19 @@ function cmd_next_scan(params)
     fl.initialize()
     serverState.scan_foundlist = fl
     serverState.scan_is_unknown_first = false
-    
-    return { success = true, count = fl.getCount() }
+    return fl.getCount()
+end
+
+function cmd_next_scan(params)
+    local busy = scanBusyError()
+    if busy then return busy end
+    local args, err = prepareNextScan(params)
+    if err then return err end
+
+    args.ms.nextScan(args.scanOpt, rtRounded, args.input1, args.input2, false, false, false, false, false)
+    args.ms.waitTillDone()
+
+    return { success = true, count = commitNextScan(args.ms) }
 end
 
 function cmd_write_integer(params)
@@ -270,3 +308,11 @@ function cmd_write_string(params)
     
     return { success = true, address = toHex(addr), length = #str, wide = wide }
 end
+
+-- >>> exports
+B.USER_MODE_MAX = USER_MODE_MAX
+B.scanBusyError = scanBusyError
+B.prepareFirstScan = prepareFirstScan
+B.commitFirstScan = commitFirstScan
+B.prepareNextScan = prepareNextScan
+B.commitNextScan = commitNextScan

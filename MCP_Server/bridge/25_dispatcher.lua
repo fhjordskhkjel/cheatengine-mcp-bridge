@@ -35,6 +35,10 @@ local commandHandlers = {
     get_opened_process_handle = cmd_get_opened_process_handle,
     -- >>> END UNIT-07 <<<
     
+    -- >>> BEGIN UNIT-27 dispatcher entries <<<
+    get_halted_state = cmd_get_halted_state,
+    -- >>> END UNIT-27 <<<
+
     -- Memory Read
     read_memory = cmd_read_memory,
     read_bytes = cmd_read_memory,  -- Alias
@@ -283,8 +287,18 @@ local function executeCommand(jsonRequest)
         return rpcError(-32601, "Method not found: " .. tostring(method), id)
     end
 
+    local t0 = os.clock()
     local ok2, result = pcall(handler, params)
+    local stats = serverState.stats
+    stats.requests = stats.requests + 1
+    stats.last_method = method
+    stats.last_ms = math.floor((os.clock() - t0) * 1000)
+    if stats.last_ms > (stats.slowest_ms or 0) then
+        stats.slowest_ms, stats.slowest_method = stats.last_ms, method
+    end
     if not ok2 then
+        stats.errors = stats.errors + 1
+        stats.last_error = tostring(result)
         return rpcError(-32603, "Internal error: " .. tostring(result), id)
     end
 
