@@ -1262,7 +1262,7 @@ JOB_STARTERS.find_pointer_path = function(job, p)
     launch(job)
 end
 
-JOB_KIND_NAMES = JOB_KIND_NAMES .. ", find_pointer_path, rtti_scan, find_string_refs, find_code_caves"
+for _, kind in ipairs({ "find_pointer_path", "rtti_scan", "find_string_refs", "find_code_caves" }) do JOB_KIND_NAMES[#JOB_KIND_NAMES + 1] = kind end
 
 -- ---------------------------------------------------------------------------
 -- snapshots: for "unknown value" hunting without running scans

@@ -418,7 +418,7 @@ JOB_STARTERS.find_xrefs = function(job, p)
         return false
     end)
 end
-JOB_KIND_NAMES = JOB_KIND_NAMES .. ", find_xrefs"
+JOB_KIND_NAMES[#JOB_KIND_NAMES + 1] = "find_xrefs"
 
 -- >>> END UNIT-28 <<<
 

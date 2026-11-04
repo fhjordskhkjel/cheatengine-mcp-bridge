@@ -92,6 +92,7 @@ sys.stdout = sys.stderr
 
 # Now safe to import libraries that might print during import
 import functools
+import inspect
 import itertools
 import json
 import select
@@ -860,7 +861,9 @@ def tool(toolset, access):
         TOOL_TOOLSET[fn.__name__] = toolset
         TOOL_ACCESS[fn.__name__] = access
         if toolset in ENABLED_TOOLSETS and access in ALLOWED_ACCESS:
-            mcp.tool(annotations=_ACCESS_ANNOTATIONS[access])(_run_off_event_loop(fn))
+            # structured_output=False: every tool returns one JSON string. With the default the SDK also declares an
+            # outputSchema ({"result": str}) and sends every result twice (text + structuredContent).
+            mcp.tool(annotations=_ACCESS_ANNOTATIONS[access], structured_output=False)(_run_off_event_loop(fn))
         return fn
     return decorator
 
@@ -3447,6 +3450,26 @@ def drop_patches(which: str = "inactive") -> str:
     return format_result(ce_client.send_command("drop_patches", {"which": which}))
 
 # >>> END UNIT-31 <<<
+
+
+def _drop_schema_titles(node):
+    """pydantic gives every argument a title that only repeats its name ("address" -> "Address") and every schema a
+    "<tool>Arguments" title. A client needs neither, and they are a third of the tool schemas sent each session.
+    Only string titles go: a parameter that is itself called `title` (find_window) is a dict and stays."""
+    if isinstance(node, dict):
+        if isinstance(node.get("title"), str):
+            del node["title"]
+        for v in node.values():
+            _drop_schema_titles(v)
+    elif isinstance(node, list):
+        for v in node:
+            _drop_schema_titles(v)
+
+
+for _tool in mcp._tool_manager.list_tools():
+    _drop_schema_titles(_tool.parameters)
+    if _tool.description:                       # docstrings carry their source indentation on every line
+        _tool.description = inspect.cleandoc(_tool.description)
 
 if __name__ == "__main__":
     try:

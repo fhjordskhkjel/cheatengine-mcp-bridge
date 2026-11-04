@@ -611,7 +611,8 @@ JOB_STARTERS.find_call_references = function(job, p)
     startAobMemscan(job, "E8 ?? ?? ?? ??", "+X")
 end
 
-local JOB_KIND_NAMES = "scan_all, next_scan, aob_scan, find_references, find_call_references"
+-- Job kinds, in the order the "Unknown job kind" error lists them; later modules append their own
+local JOB_KIND_NAMES = { "scan_all", "next_scan", "aob_scan", "find_references", "find_call_references" }
 
 local function jobSummary(job)
     local s = {
@@ -637,7 +638,7 @@ function cmd_start_job(params)
     local kind = params.kind
     local starter = JOB_STARTERS[kind]
     if not starter then
-        return { success = false, error = "Unknown job kind '" .. tostring(kind) .. "'. Valid: " .. JOB_KIND_NAMES, error_code = "INVALID_PARAMS" }
+        return { success = false, error = "Unknown job kind '" .. tostring(kind) .. "'. Valid: " .. table.concat(JOB_KIND_NAMES, ", "), error_code = "INVALID_PARAMS" }
     end
     local p = params.params
     if p ~= nil and type(p) ~= "table" then
