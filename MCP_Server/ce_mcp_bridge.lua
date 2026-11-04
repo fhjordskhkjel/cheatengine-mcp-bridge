@@ -867,7 +867,7 @@ function cmd_get_process_info(params)
             used_aob_fallback = usedAobFallback
         }
     end
-    return { success = false, error = "No process attached" }
+    return { success = false, error = "No process attached", error_code = "NO_PROCESS" }
 end
 
 function cmd_enum_modules(params)
@@ -938,13 +938,13 @@ end
 
 function cmd_get_symbol_address(params)
     local symbol = params.symbol or params.name
-    if not symbol then return { success = false, error = "No symbol name" } end
+    if not symbol then return { success = false, error = "No symbol name", error_code = "INVALID_PARAMS" } end
     
     local addr = getAddressSafe(symbol)
     if addr then
         return { success = true, symbol = symbol, address = toHex(addr), value = addr }
     end
-    return { success = false, error = "Symbol not found: " .. symbol }
+    return { success = false, error = "Symbol not found: " .. symbol, error_code = "NOT_FOUND" }
 end
 
 -- ============================================================================
@@ -956,10 +956,10 @@ function cmd_read_memory(params)
     local size = math.max(1, math.min(params.size or 256, 1048576))  -- 1 MB max
     
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     
     local bytes = readBytes(addr, size, true)
-    if not bytes then return { success = false, error = "Failed to read at " .. toHex(addr) } end
+    if not bytes then return { success = false, error = "Failed to read at " .. toHex(addr), error_code = "INVALID_ADDRESS" } end
     
     local hex = {}
     for i, b in ipairs(bytes) do hex[i] = string.format("%02X", b) end
@@ -978,7 +978,7 @@ function cmd_read_integer(params)
     local itype = params.type or "dword"
     
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     
     local val, floatHex
     if itype == "byte" then
@@ -1003,9 +1003,9 @@ function cmd_read_integer(params)
                 floatHex = string.format("0x%016X", string.unpack("<i8", raw))
             end
         end
-    else return { success = false, error = "Unknown type: " .. tostring(itype) } end
+    else return { success = false, error = "Unknown type: " .. tostring(itype), error_code = "INVALID_PARAMS" } end
     
-    if val == nil then return { success = false, error = "Failed to read at " .. toHex(addr) } end
+    if val == nil then return { success = false, error = "Failed to read at " .. toHex(addr), error_code = "INVALID_ADDRESS" } end
 
     -- For float/double, "hex" is the raw IEEE-754 bit pattern (what you would
     -- AOB-scan for or patch), not the truncated numeric value.
@@ -1023,7 +1023,7 @@ function cmd_read_string(params)
     local encoding = params.encoding or (wide and "utf16le" or "utf8")
 
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     local parts = {}
     local rawLen = 0
@@ -1118,7 +1118,7 @@ function cmd_read_pointer(params)
     local offsets = params.offsets or {}
     
     if type(base) == "string" then base = getAddressSafe(base) end
-    if not base then return { success = false, error = "Invalid base address" } end
+    if not base then return { success = false, error = "Invalid base address", error_code = "INVALID_ADDRESS" } end
     
     local currentAddr = base
     local path = { toHex(base) }
@@ -1127,7 +1127,7 @@ function cmd_read_pointer(params)
         -- Use readPointer for 32/64-bit compatibility (readInteger on 32-bit, readQword on 64-bit)
         local ptr = readPointer(currentAddr)
         if not ptr then
-            return { success = false, error = "Failed to read pointer at " .. toHex(currentAddr), path = path }
+            return { success = false, error = "Failed to read pointer at " .. toHex(currentAddr), path = path, error_code = "INVALID_ADDRESS" }
         end
         currentAddr = ptr + offset
         table.insert(path, toHex(currentAddr))
@@ -1153,7 +1153,7 @@ function cmd_aob_scan(params)
     local protection = params.protection or "+X"
     local limit = params.limit or 100
     
-    if not pattern then return { success = false, error = "No pattern provided" } end
+    if not pattern then return { success = false, error = "No pattern provided", error_code = "INVALID_PARAMS" } end
     
     local results = AOBScan(pattern, protection)
     if not results then return { success = true, count = 0, addresses = {} } end
@@ -1238,7 +1238,7 @@ function cmd_get_scan_results(params)
     local offset = math.max(0, params.offset or 0)
 
     if not serverState.scan_foundlist then
-        return { success = false, error = "No scan results. Run scan_all first." }
+        return { success = false, error = "No scan results. Run scan_all first.", error_code = "NOT_FOUND" }
     end
 
     local fl = serverState.scan_foundlist
@@ -1293,7 +1293,7 @@ function cmd_next_scan(params)
     local scanType = params.scan_option or params.scan_type or "exact"
 
     if not serverState.scan_memscan then
-        return { success = false, error = "No previous scan. Run scan_all first." }
+        return { success = false, error = "No previous scan. Run scan_all first.", error_code = "NOT_FOUND" }
     end
 
     local ms = serverState.scan_memscan
@@ -1330,7 +1330,7 @@ function cmd_write_integer(params)
     local vtype = params.type or "dword"
 
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     if vtype == "byte" then
         if type(value) ~= "number" or value < 0 or value > 0xFF then
@@ -1360,11 +1360,11 @@ function cmd_write_integer(params)
     elseif vtype == "double" then
         ok, err = pcall(writeDouble, addr, value)
     else
-        return { success = false, error = "Unknown type: " .. tostring(vtype) }
+        return { success = false, error = "Unknown type: " .. tostring(vtype), error_code = "INVALID_PARAMS" }
     end
 
     if not ok then
-        return { success = false, error = "Write failed: " .. tostring(err), address = toHex(addr) }
+        return { success = false, error = "Write failed: " .. tostring(err), address = toHex(addr), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, address = toHex(addr), value = value, type = vtype }
@@ -1375,13 +1375,13 @@ function cmd_write_memory(params)
     local bytes = params.bytes
     
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
-    if not bytes or #bytes == 0 then return { success = false, error = "No bytes provided" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
+    if not bytes or #bytes == 0 then return { success = false, error = "No bytes provided", error_code = "INVALID_PARAMS" } end
     
     local ok, err = pcall(writeBytes, addr, bytes)
     
     if not ok then
-        return { success = false, error = "Write failed: " .. tostring(err), address = toHex(addr) }
+        return { success = false, error = "Write failed: " .. tostring(err), address = toHex(addr), error_code = "INTERNAL_ERROR" }
     end
     
     return { success = true, address = toHex(addr), bytes_written = #bytes }
@@ -1393,13 +1393,13 @@ function cmd_write_string(params)
     local wide = params.wide or false
     
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
-    if not str then return { success = false, error = "No string provided" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
+    if not str then return { success = false, error = "No string provided", error_code = "INVALID_PARAMS" } end
     
     local ok, err = pcall(writeString, addr, str, wide)
     
     if not ok then
-        return { success = false, error = "Write failed: " .. tostring(err), address = toHex(addr) }
+        return { success = false, error = "Write failed: " .. tostring(err), address = toHex(addr), error_code = "INTERNAL_ERROR" }
     end
     
     return { success = true, address = toHex(addr), length = #str, wide = wide }
@@ -1416,7 +1416,7 @@ function cmd_disassemble(params)
     local count = math.max(1, math.min(params.count or 20, 1000))
 
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     local allInstructions = {}
     local currentAddr = addr
@@ -1449,11 +1449,11 @@ function cmd_get_instruction_info(params)
     local addr = params.address
     
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     
     local ok, disasm = pcall(disassemble, addr)
     if not ok or not disasm then
-        return { success = false, error = "Failed to disassemble at " .. toHex(addr) }
+        return { success = false, error = "Failed to disassemble at " .. toHex(addr), error_code = "INVALID_ADDRESS" }
     end
     local size = getInstructionSize(addr)
     local bytes = readBytes(addr, size or 1, true) or {}
@@ -1477,7 +1477,7 @@ function cmd_find_function_boundaries(params)
     local maxSearch = params.max_search or 4096
 
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     local is64 = targetIs64Bit()
 
@@ -1514,7 +1514,7 @@ function cmd_analyze_function(params)
     local addr = params.address
     
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     
     local is64 = targetIs64Bit()
 
@@ -1525,7 +1525,8 @@ function cmd_analyze_function(params)
             success = false, 
             error = "Could not find function start",
             arch = is64 and "x64" or "x86",
-            query_address = toHex(addr)
+            query_address = toHex(addr),
+            error_code = "NOT_FOUND"
         } 
     end
     
@@ -1593,7 +1594,7 @@ function cmd_find_references(params)
     local targetAddr = params.address
 
     if type(targetAddr) == "string" then targetAddr = getAddressSafe(targetAddr) end
-    if not targetAddr then return { success = false, error = "Invalid address" } end
+    if not targetAddr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     local is64 = targetIs64Bit()
     local pattern
@@ -1640,7 +1641,7 @@ function cmd_find_call_references(params)
     local funcAddr = params.address or params.function_address
 
     if type(funcAddr) == "string" then funcAddr = getAddressSafe(funcAddr) end
-    if not funcAddr then return { success = false, error = "Invalid function address" } end
+    if not funcAddr then return { success = false, error = "Invalid function address", error_code = "INVALID_ADDRESS" } end
 
     -- Collect ALL matching callers to get accurate total for pagination
     local allCallers = {}
@@ -1698,7 +1699,7 @@ function cmd_set_breakpoint(params)
     local maxHits = parseMaxHits(params.max_hits)
 
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     bpId = bpId or tostring(addr)
     -- Avoid collision if an existing breakpoint has the same ID
@@ -1720,7 +1721,7 @@ function cmd_set_breakpoint(params)
     end
 
     if not slot then
-        return { success = false, error = "No free hardware breakpoint slots (max 4 debug registers)" }
+        return { success = false, error = "No free hardware breakpoint slots (max 4 debug registers)", error_code = "OUT_OF_RESOURCES" }
     end
 
     -- Remove existing breakpoint at this address
@@ -1761,7 +1762,7 @@ function cmd_set_data_breakpoint(params)
     local maxHits = parseMaxHits(params.max_hits)
 
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     bpId = bpId or tostring(addr)
     -- Avoid collision if an existing breakpoint has the same ID
@@ -1783,7 +1784,7 @@ function cmd_set_data_breakpoint(params)
     end
 
     if not slot then
-        return { success = false, error = "No free hardware breakpoint slots (max 4 debug registers)" }
+        return { success = false, error = "No free hardware breakpoint slots (max 4 debug registers)", error_code = "OUT_OF_RESOURCES" }
     end
 
     local bpType = bptWrite
@@ -1833,7 +1834,7 @@ function cmd_remove_breakpoint(params)
         return { success = true, id = bpId }
     end
     
-    return { success = false, error = "Breakpoint not found: " .. tostring(bpId) }
+    return { success = false, error = "Breakpoint not found: " .. tostring(bpId), error_code = "NOT_FOUND" }
 end
 
 function cmd_get_breakpoint_hits(params)
@@ -1925,13 +1926,13 @@ end
 
 function cmd_evaluate_lua(params)
     local code = params.code
-    if not code then return { success = false, error = "No code provided" } end
+    if not code then return { success = false, error = "No code provided", error_code = "INVALID_PARAMS" } end
 
     local fn, err = load(code, "mcp_evaluate_lua", "t")
-    if not fn then return { success = false, error = "Compile error: " .. tostring(err) } end
+    if not fn then return { success = false, error = "Compile error: " .. tostring(err), error_code = "INVALID_PARAMS" } end
 
     local packed = table.pack(pcall(fn))
-    if not packed[1] then return { success = false, error = "Runtime error: " .. tostring(packed[2]) } end
+    if not packed[1] then return { success = false, error = "Runtime error: " .. tostring(packed[2]), error_code = "INTERNAL_ERROR" } end
 
     -- result: tostring() of the first return value (backward compatible).
     -- results: every return value as structured JSON (tables included).
@@ -1960,7 +1961,7 @@ function cmd_create_thread(params)
     -- It carries the same risk as evaluate_lua. Only use with trusted code.
     local code = params.code
     local arg  = params.arg or ""
-    if not code then return { success = false, error = "No code provided" } end
+    if not code then return { success = false, error = "No code provided", error_code = "INVALID_PARAMS" } end
 
     local ok, err = pcall(function()
         createThread(function(thread, a)
@@ -1971,7 +1972,7 @@ function cmd_create_thread(params)
     end)
 
     if not ok then
-        return { success = false, error = "createThread failed: " .. tostring(err) }
+        return { success = false, error = "createThread failed: " .. tostring(err), error_code = "INTERNAL_ERROR" }
     end
     _unit22_thread_counter = _unit22_thread_counter + 1
     return { success = true, thread_id = _unit22_thread_counter }
@@ -1979,11 +1980,11 @@ end
 
 function cmd_get_global_variable(params)
     local name = params.name
-    if not name then return { success = false, error = "No variable name provided" } end
+    if not name then return { success = false, error = "No variable name provided", error_code = "INVALID_PARAMS" } end
 
     local ok, value = pcall(getGlobalVariable, name)
     if not ok then
-        return { success = false, error = "getGlobalVariable failed: " .. tostring(value) }
+        return { success = false, error = "getGlobalVariable failed: " .. tostring(value), error_code = "INTERNAL_ERROR" }
     end
     return { success = true, value = tostring(value) }
 end
@@ -1991,12 +1992,12 @@ end
 function cmd_set_global_variable(params)
     local name  = params.name
     local value = params.value
-    if not name  then return { success = false, error = "No variable name provided"  } end
-    if value == nil then return { success = false, error = "No value provided" } end
+    if not name  then return { success = false, error = "No variable name provided", error_code = "INVALID_PARAMS" } end
+    if value == nil then return { success = false, error = "No value provided", error_code = "INVALID_PARAMS" } end
 
     local ok, err = pcall(setGlobalVariable, name, value)
     if not ok then
-        return { success = false, error = "setGlobalVariable failed: " .. tostring(err) }
+        return { success = false, error = "setGlobalVariable failed: " .. tostring(err), error_code = "INTERNAL_ERROR" }
     end
     return { success = true }
 end
@@ -2005,7 +2006,7 @@ function cmd_queue_to_main_thread(params)
     -- SECURITY WARNING: This tool executes arbitrary Lua code inside CE's process
     -- on the main thread. It carries the same risk as evaluate_lua.
     local code = params.code
-    if not code then return { success = false, error = "No code provided" } end
+    if not code then return { success = false, error = "No code provided", error_code = "INVALID_PARAMS" } end
 
     local ok, err = pcall(function()
         queue(function()
@@ -2016,7 +2017,7 @@ function cmd_queue_to_main_thread(params)
     end)
 
     if not ok then
-        return { success = false, error = "queue failed: " .. tostring(err) }
+        return { success = false, error = "queue failed: " .. tostring(err), error_code = "INTERNAL_ERROR" }
     end
     return { success = true }
 end
@@ -2024,7 +2025,7 @@ end
 function cmd_check_synchronize(params)
     local ok, err = pcall(checkSynchronize)
     if not ok then
-        return { success = false, error = "checkSynchronize failed: " .. tostring(err) }
+        return { success = false, error = "checkSynchronize failed: " .. tostring(err), error_code = "INTERNAL_ERROR" }
     end
     return { success = true }
 end
@@ -2032,7 +2033,7 @@ end
 function cmd_in_main_thread(params)
     local ok, result = pcall(inMainThread)
     if not ok then
-        return { success = false, error = "inMainThread failed: " .. tostring(result) }
+        return { success = false, error = "inMainThread failed: " .. tostring(result), error_code = "INTERNAL_ERROR" }
     end
     return { success = true, is_main_thread = result == true }
 end
@@ -2120,7 +2121,7 @@ function cmd_search_string(params)
     local wide = params.wide or false
     local limit = params.limit or 100
     
-    if not searchStr then return { success = false, error = "No search string" } end
+    if not searchStr then return { success = false, error = "No search string", error_code = "INVALID_PARAMS" } end
     
     -- Convert string to AOB pattern
     local pattern = ""
@@ -2157,12 +2158,12 @@ function cmd_dissect_structure(params)
     local size = params.size or 256
     
     if type(address) == "string" then address = getAddressSafe(address) end
-    if not address then return { success = false, error = "Invalid address" } end
+    if not address then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     
     -- Create a temporary structure and use autoGuess
     local ok, struct = pcall(createStructure, "MCP_TempStruct")
     if not ok or not struct then
-        return { success = false, error = "Failed to create structure" }
+        return { success = false, error = "Failed to create structure", error_code = "INTERNAL_ERROR" }
     end
     
     -- Use the Structure class autoGuess method
@@ -2222,7 +2223,7 @@ function cmd_auto_assemble(params)
     local script = params.script or params.code
     local disable = params.disable or false
     
-    if not script then return { success = false, error = "No script provided" } end
+    if not script then return { success = false, error = "No script provided", error_code = "INVALID_PARAMS" } end
     
     local success, disableInfo = autoAssemble(script)
     
@@ -2242,7 +2243,8 @@ function cmd_auto_assemble(params)
     else
         return {
             success = false,
-            error = "AutoAssemble failed: " .. tostring(disableInfo)
+            error = "AutoAssemble failed: " .. tostring(disableInfo),
+            error_code = "INTERNAL_ERROR"
         }
     end
 end
@@ -2251,7 +2253,7 @@ end
 function cmd_enum_memory_regions_full(params)
     local ok, regions = pcall(enumMemoryRegions)
     if not ok or not regions then
-        return { success = false, error = "enumMemoryRegions failed" }
+        return { success = false, error = "enumMemoryRegions failed", error_code = "INTERNAL_ERROR" }
     end
 
     local allRegions = {}
@@ -2292,7 +2294,7 @@ function cmd_read_pointer_chain(params)
     local offsets = params.offsets or {}
     local r = resolveChain(params.base, offsets)
     if not r.ok then
-        return { success = false, error = r.error, partial_chain = r.chain, failed_at_address = r.failed_at }
+        return { success = false, error = r.error, partial_chain = r.chain, failed_at_address = r.failed_at, error_code = "INVALID_ADDRESS" }
     end
     return {
         success = true,
@@ -2309,7 +2311,7 @@ function cmd_get_rtti_classname(params)
     local address = params.address
     
     if type(address) == "string" then address = getAddressSafe(address) end
-    if not address then return { success = false, error = "Invalid address" } end
+    if not address then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     
     local className = getRTTIClassName(address)
     
@@ -2339,7 +2341,7 @@ function cmd_get_address_info(params)
     local includeSections = params.include_sections or false  -- default false
     
     if type(address) == "string" then address = getAddressSafe(address) end
-    if not address then return { success = false, error = "Invalid address" } end
+    if not address then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     
     local symbolicName = getNameFromAddress(address, includeModules, includeSymbols, includeSections)
     
@@ -2377,7 +2379,7 @@ function cmd_checksum_memory(params)
     local size = params.size or 256
     
     if type(address) == "string" then address = getAddressSafe(address) end
-    if not address then return { success = false, error = "Invalid address" } end
+    if not address then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     
     local ok, hash = pcall(md5memory, address, size)
     
@@ -2393,7 +2395,8 @@ function cmd_checksum_memory(params)
             success = false,
             address = toHex(address),
             size = size,
-            error = "Failed to calculate MD5: " .. tostring(hash)
+            error = "Failed to calculate MD5: " .. tostring(hash),
+            error_code = "INTERNAL_ERROR"
         }
     end
 end
@@ -2402,7 +2405,7 @@ end
 function cmd_generate_signature(params)
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     
     -- getUniqueAOB(address) returns: AOBString, Offset
     -- It scans for a unique byte pattern that identifies this location
@@ -2412,7 +2415,8 @@ function cmd_generate_signature(params)
         return {
             success = false,
             address = toHex(addr),
-            error = "getUniqueAOB failed: " .. tostring(signature)
+            error = "getUniqueAOB failed: " .. tostring(signature),
+            error_code = "INTERNAL_ERROR"
         }
     end
     
@@ -2420,7 +2424,8 @@ function cmd_generate_signature(params)
         return {
             success = false,
             address = toHex(addr),
-            error = "Could not generate unique signature - pattern not unique enough"
+            error = "Could not generate unique signature - pattern not unique enough",
+            error_code = "NOT_FOUND"
         }
     end
     
@@ -2453,7 +2458,7 @@ end
 function cmd_get_physical_address(params)
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     
     -- Check if DBK (kernel driver) is available
     local ok, phys = pcall(dbk_getPhysicalAddress, addr)
@@ -2462,7 +2467,8 @@ function cmd_get_physical_address(params)
         return {
             success = false,
             virtual_address = toHex(addr),
-            error = "DBK driver not loaded. Run dbk_initialize() first or load it via CE settings."
+            error = "DBK driver not loaded. Run dbk_initialize() first or load it via CE settings.",
+            error_code = "DBK_NOT_LOADED"
         }
     end
     
@@ -2470,7 +2476,8 @@ function cmd_get_physical_address(params)
         return {
             success = false,
             virtual_address = toHex(addr),
-            error = "Could not resolve physical address. Page may not be present in RAM."
+            error = "Could not resolve physical address. Page may not be present in RAM.",
+            error_code = "INVALID_ADDRESS"
         }
     end
     
@@ -2492,18 +2499,18 @@ function cmd_start_dbvm_watch(params)
     local maxEntries = params.max_entries or 1000  -- Internal buffer size
     
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     
     -- 0. Safety Checks
     if not dbk_initialized() then
-        return { success = false, error = "DBK driver not loaded. Go to Settings -> Debugger -> Kernelmode" }
+        return { success = false, error = "DBK driver not loaded. Go to Settings -> Debugger -> Kernelmode", error_code = "DBK_NOT_LOADED" }
     end
     
     if not dbvm_initialized() then
         -- Try to initialize if possible
         pcall(dbvm_initialize)
         if not dbvm_initialized() then
-            return { success = false, error = "DBVM not running. Go to Settings -> Debugger -> Use DBVM" }
+            return { success = false, error = "DBVM not running. Go to Settings -> Debugger -> Use DBVM", error_code = "DBVM_NOT_LOADED" }
         end
     end
 
@@ -2513,7 +2520,8 @@ function cmd_start_dbvm_watch(params)
         return {
             success = false,
             virtual_address = toHex(addr),
-            error = "Could not resolve physical address. Page might be paged out or invalid."
+            error = "Could not resolve physical address. Page might be paged out or invalid.",
+            error_code = "INVALID_ADDRESS"
         }
     end
     
@@ -2523,7 +2531,8 @@ function cmd_start_dbvm_watch(params)
         return {
             success = false,
             virtual_address = toHex(addr),
-            error = "Already watching this address. Call stop_dbvm_watch first."
+            error = "Already watching this address. Call stop_dbvm_watch first.",
+            error_code = "INVALID_PARAMS"
         }
     end
     
@@ -2542,7 +2551,7 @@ function cmd_start_dbvm_watch(params)
 
     if mode == "x" then
         if not dbvm_watch_executes then
-            return { success = false, error = "dbvm_watch_executes function missing from CE Lua engine" }
+            return { success = false, error = "dbvm_watch_executes function missing from CE Lua engine", error_code = "CE_API_UNAVAILABLE" }
         end
         okWatch, result = pcall(dbvm_watch_executes, phys, 1, options, maxEntries)
         watch_id = okWatch and result or nil
@@ -2559,7 +2568,8 @@ function cmd_start_dbvm_watch(params)
             success = false,
             virtual_address = toHex(addr),
             physical_address = toHex(phys),
-            error = "DBVM watch CRASHED/FAILED: " .. tostring(result)
+            error = "DBVM watch CRASHED/FAILED: " .. tostring(result),
+            error_code = "INTERNAL_ERROR"
         }
     end
     
@@ -2568,7 +2578,8 @@ function cmd_start_dbvm_watch(params)
             success = false,
             virtual_address = toHex(addr),
             physical_address = toHex(phys),
-            error = "DBVM watch returned nil (check CE console for details)"
+            error = "DBVM watch returned nil (check CE console for details)",
+            error_code = "INTERNAL_ERROR"
         }
     end
     
@@ -2599,7 +2610,7 @@ function cmd_poll_dbvm_watch(params)
     local max_results = params.max_results or 1000
     
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     
     local watchKey = toHex(addr)
     local watchInfo = serverState.active_watches[watchKey]
@@ -2608,7 +2619,8 @@ function cmd_poll_dbvm_watch(params)
         return {
             success = false,
             virtual_address = toHex(addr),
-            error = "No active watch found for this address. Call start_dbvm_watch first."
+            error = "No active watch found for this address. Call start_dbvm_watch first.",
+            error_code = "NOT_FOUND"
         }
     end
     
@@ -2667,7 +2679,7 @@ end
 function cmd_stop_dbvm_watch(params)
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     
     local watchKey = toHex(addr)
     local watchInfo = serverState.active_watches[watchKey]
@@ -2676,7 +2688,8 @@ function cmd_stop_dbvm_watch(params)
         return {
             success = false,
             virtual_address = toHex(addr),
-            error = "No active watch found for this address"
+            error = "No active watch found for this address",
+            error_code = "NOT_FOUND"
         }
     end
     
@@ -2746,7 +2759,7 @@ function cmd_output_debug_string(params)
         return { success = false, error = "message must be a string", error_code = "INVALID_PARAMS" }
     end
     local ok, err = pcall(outputDebugString, message)
-    if not ok then return { success = false, error = tostring(err) } end
+    if not ok then return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" } end
     return { success = true }
 end
 
@@ -2761,7 +2774,7 @@ function cmd_speak_text(params)
     else
         ok, err = pcall(speak, text)
     end
-    if not ok then return { success = false, error = tostring(err) } end
+    if not ok then return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" } end
     return { success = true }
 end
 
@@ -2770,13 +2783,13 @@ function cmd_play_sound(params)
         return { success = false, error = "Invalid filename", error_code = "INVALID_PARAMS" }
     end
     local ok, err = pcall(playSound, params.filename)
-    if not ok then return { success = false, error = tostring(err) } end
+    if not ok then return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" } end
     return { success = true }
 end
 
 function cmd_beep(params)
     local ok, err = pcall(beep)
-    if not ok then return { success = false, error = tostring(err) } end
+    if not ok then return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" } end
     return { success = true }
 end
 
@@ -2786,7 +2799,7 @@ function cmd_set_progress_state(params)
         return { success = false, error = "state must be one of: none, normal, paused, error, indeterminate", error_code = "INVALID_PARAMS" }
     end
     local ok, err = pcall(setProgressState, tbState)
-    if not ok then return { success = false, error = tostring(err) } end
+    if not ok then return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" } end
     return { success = true }
 end
 
@@ -2797,7 +2810,7 @@ function cmd_set_progress_value(params)
         return { success = false, error = "current and max must be numbers", error_code = "INVALID_PARAMS" }
     end
     local ok, err = pcall(setProgressValue, current, max)
-    if not ok then return { success = false, error = tostring(err) } end
+    if not ok then return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" } end
     return { success = true }
 end
 
@@ -2843,7 +2856,7 @@ end
 function cmd_read_process_memory_cr3(params)
     local pid = getOpenedProcessID()
     if not pid or pid == 0 then
-        return { success = false, error = "No process attached" }
+        return { success = false, error = "No process attached", error_code = "NO_PROCESS" }
     end
 
     local cr3_str  = params.cr3
@@ -2851,19 +2864,19 @@ function cmd_read_process_memory_cr3(params)
     local size     = tonumber(params.size)
 
     if not cr3_str or not addr_str or not size or size <= 0 then
-        return { success = false, error = "Parameters cr3, address and size are required" }
+        return { success = false, error = "Parameters cr3, address and size are required", error_code = "INVALID_PARAMS" }
     end
 
     local cr3  = type(cr3_str)  == "string" and getAddressSafe(cr3_str)  or cr3_str
     local addr = type(addr_str) == "string" and getAddressSafe(addr_str) or addr_str
     if not cr3 or not addr then
-        return { success = false, error = "Invalid cr3 or address value" }
+        return { success = false, error = "Invalid cr3 or address value", error_code = "INVALID_ADDRESS" }
     end
 
     local ok, byteTable = pcall(readProcessMemoryCR3, cr3, addr, size)
     if not ok then return dbkNotLoadedError() end
     if not byteTable then
-        return { success = false, error = "Read failed — page may be paged out or invalid" }
+        return { success = false, error = "Read failed — page may be paged out or invalid", error_code = "INVALID_ADDRESS" }
     end
 
     return { success = true, bytes = byteTable, size = #byteTable }
@@ -2872,7 +2885,7 @@ end
 function cmd_write_process_memory_cr3(params)
     local pid = getOpenedProcessID()
     if not pid or pid == 0 then
-        return { success = false, error = "No process attached" }
+        return { success = false, error = "No process attached", error_code = "NO_PROCESS" }
     end
 
     local cr3_str  = params.cr3
@@ -2880,13 +2893,13 @@ function cmd_write_process_memory_cr3(params)
     local bytes    = params.bytes
 
     if not cr3_str or not addr_str or not bytes or type(bytes) ~= "table" then
-        return { success = false, error = "Parameters cr3, address and bytes (list) are required" }
+        return { success = false, error = "Parameters cr3, address and bytes (list) are required", error_code = "INVALID_PARAMS" }
     end
 
     local cr3  = type(cr3_str)  == "string" and getAddressSafe(cr3_str)  or cr3_str
     local addr = type(addr_str) == "string" and getAddressSafe(addr_str) or addr_str
     if not cr3 or not addr then
-        return { success = false, error = "Invalid cr3 or address value" }
+        return { success = false, error = "Invalid cr3 or address value", error_code = "INVALID_ADDRESS" }
     end
 
     local ok = pcall(writeProcessMemoryCR3, cr3, addr, bytes)
@@ -2898,25 +2911,25 @@ end
 function cmd_map_memory(params)
     local pid = getOpenedProcessID()
     if not pid or pid == 0 then
-        return { success = false, error = "No process attached" }
+        return { success = false, error = "No process attached", error_code = "NO_PROCESS" }
     end
 
     local addr_str = params.address
     local size     = tonumber(params.size)
 
     if not addr_str or not size or size <= 0 then
-        return { success = false, error = "Parameters address and size are required" }
+        return { success = false, error = "Parameters address and size are required", error_code = "INVALID_PARAMS" }
     end
 
     local addr = type(addr_str) == "string" and getAddressSafe(addr_str) or addr_str
     if not addr then
-        return { success = false, error = "Invalid address value" }
+        return { success = false, error = "Invalid address value", error_code = "INVALID_ADDRESS" }
     end
 
     local ok, mappedAddr, mdl = pcall(mapMemory, addr, size)
     if not ok then return dbkNotLoadedError() end
     if not mappedAddr then
-        return { success = false, error = "mapMemory failed — address may be invalid or DBK not loaded" }
+        return { success = false, error = "mapMemory failed — address may be invalid or DBK not loaded", error_code = "INTERNAL_ERROR" }
     end
 
     local key = toHex(mappedAddr)
@@ -2928,17 +2941,17 @@ end
 function cmd_unmap_memory(params)
     local pid = getOpenedProcessID()
     if not pid or pid == 0 then
-        return { success = false, error = "No process attached" }
+        return { success = false, error = "No process attached", error_code = "NO_PROCESS" }
     end
 
     local addr_str = params.mapped_address
     if not addr_str then
-        return { success = false, error = "Parameter mapped_address is required" }
+        return { success = false, error = "Parameter mapped_address is required", error_code = "INVALID_PARAMS" }
     end
 
     local addr = type(addr_str) == "string" and getAddressSafe(addr_str) or addr_str
     if not addr then
-        return { success = false, error = "Invalid mapped_address value" }
+        return { success = false, error = "Invalid mapped_address value", error_code = "INVALID_ADDRESS" }
     end
 
     local key = toHex(addr)
@@ -2953,7 +2966,7 @@ end
 function cmd_dbk_writes_ignore_write_protection(params)
     local enable = params.enable
     if type(enable) ~= "boolean" then
-        return { success = false, error = "Parameter enable (boolean) is required" }
+        return { success = false, error = "Parameter enable (boolean) is required", error_code = "INVALID_PARAMS" }
     end
 
     local ok = pcall(dbk_writesIgnoreWriteProtection, enable)
@@ -2965,26 +2978,26 @@ end
 function cmd_get_physical_address_cr3(params)
     local pid = getOpenedProcessID()
     if not pid or pid == 0 then
-        return { success = false, error = "No process attached" }
+        return { success = false, error = "No process attached", error_code = "NO_PROCESS" }
     end
 
     local cr3_str = params.cr3
     local va_str  = params.virtual_address
 
     if not cr3_str or not va_str then
-        return { success = false, error = "Parameters cr3 and virtual_address are required" }
+        return { success = false, error = "Parameters cr3 and virtual_address are required", error_code = "INVALID_PARAMS" }
     end
 
     local cr3 = type(cr3_str) == "string" and getAddressSafe(cr3_str) or cr3_str
     local va  = type(va_str)  == "string" and getAddressSafe(va_str)  or va_str
     if not cr3 or not va then
-        return { success = false, error = "Invalid cr3 or virtual_address value" }
+        return { success = false, error = "Invalid cr3 or virtual_address value", error_code = "INVALID_ADDRESS" }
     end
 
     local ok, phys = pcall(getPhysicalAddressCR3, cr3, va)
     if not ok then return dbkNotLoadedError() end
     if not phys then
-        return { success = false, error = "Address not paged — virtual address may not be mapped in this CR3" }
+        return { success = false, error = "Address not paged — virtual address may not be mapped in this CR3", error_code = "INVALID_ADDRESS" }
     end
 
     return { success = true, physical_address = toHex(phys) }
@@ -3005,26 +3018,26 @@ end
 function cmd_file_exists(params)
     local filename = params.filename
     local f, err = sanitizeFilename(filename)
-    if not f then return { success = false, error = err } end
+    if not f then return { success = false, error = err, error_code = "INVALID_PARAMS" } end
     local ok, result = pcall(fileExists, f)
-    if not ok then return { success = false, error = tostring(result) } end
+    if not ok then return { success = false, error = tostring(result), error_code = "INTERNAL_ERROR" } end
     return { success = true, exists = result == true }
 end
 
 function cmd_delete_file(params)
     local filename = params.filename
     local f, err = sanitizeFilename(filename)
-    if not f then return { success = false, error = err } end
+    if not f then return { success = false, error = err, error_code = "INVALID_PARAMS" } end
     local ok, result = pcall(deleteFile, f)
-    if not ok then return { success = false, error = tostring(result) } end
+    if not ok then return { success = false, error = tostring(result), error_code = "INTERNAL_ERROR" } end
     return { success = true }
 end
 
 local function listPathEntries(path, ceFn, resultKey)
     local f, err = sanitizeFilename(path)
-    if not f then return { success = false, error = err } end
+    if not f then return { success = false, error = err, error_code = "INVALID_PARAMS" } end
     local ok, result = pcall(ceFn, f)
-    if not ok then return { success = false, error = tostring(result) } end
+    if not ok then return { success = false, error = tostring(result), error_code = "INTERNAL_ERROR" } end
     local entries = {}
     if type(result) == "table" then
         for _, v in ipairs(result) do table.insert(entries, v) end
@@ -3042,18 +3055,18 @@ end
 
 function cmd_get_temp_folder(params)
     local ok, result = pcall(getTempFolder)
-    if not ok then return { success = false, error = tostring(result) } end
+    if not ok then return { success = false, error = tostring(result), error_code = "INTERNAL_ERROR" } end
     return { success = true, path = tostring(result) }
 end
 
 function cmd_get_file_version(params)
     local f, err = sanitizeFilename(params.filename)
-    if not f then return { success = false, error = err } end
+    if not f then return { success = false, error = err, error_code = "INVALID_PARAMS" } end
     -- getFileVersion returns two values; wrap in a closure so pcall captures both
     local ok, errOrRaw, verTable = pcall(function() return getFileVersion(f) end)
-    if not ok then return { success = false, error = tostring(errOrRaw) } end
+    if not ok then return { success = false, error = tostring(errOrRaw), error_code = "INTERNAL_ERROR" } end
     if type(verTable) ~= "table" then
-        return { success = false, error = "getFileVersion did not return a version table" }
+        return { success = false, error = "getFileVersion did not return a version table", error_code = "INTERNAL_ERROR" }
     end
     local major   = verTable.major   or 0
     local minor   = verTable.minor   or 0
@@ -3071,15 +3084,15 @@ end
 
 function cmd_read_clipboard(params)
     local ok, result = pcall(readFromClipboard)
-    if not ok then return { success = false, error = tostring(result) } end
+    if not ok then return { success = false, error = tostring(result), error_code = "INTERNAL_ERROR" } end
     return { success = true, text = tostring(result or "") }
 end
 
 function cmd_write_clipboard(params)
     local text = params.text
-    if type(text) ~= "string" then return { success = false, error = "text must be a string" } end
+    if type(text) ~= "string" then return { success = false, error = "text must be a string", error_code = "INVALID_PARAMS" } end
     local ok, err = pcall(writeToClipboard, text)
-    if not ok then return { success = false, error = tostring(err) } end
+    if not ok then return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" } end
     return { success = true }
 end
 
@@ -3121,13 +3134,13 @@ function cmd_run_command(params)
     local args = params.args or ""
 
     if not command or command == "" then
-        return { success = false, error = "No command provided" }
+        return { success = false, error = "No command provided", error_code = "INVALID_PARAMS" }
     end
 
     local ok, output, exitCode = pcall(runCommand, command, args)
 
     if not ok then
-        return { success = false, error = "runCommand failed: " .. tostring(output) }
+        return { success = false, error = "runCommand failed: " .. tostring(output), error_code = "INTERNAL_ERROR" }
     end
 
     return {
@@ -3149,7 +3162,7 @@ function cmd_shell_execute(params)
     local showCommand = params.showcommand
 
     if not command or command == "" then
-        return { success = false, error = "No command provided" }
+        return { success = false, error = "No command provided", error_code = "INVALID_PARAMS" }
     end
 
     -- CE's shellExecute wrapper does not expose an explicit "verb" argument.
@@ -3165,7 +3178,7 @@ function cmd_shell_execute(params)
     local ok, err = pcall(shellExecute, command, args, workingDir ~= "" and workingDir or nil, showCommand)
 
     if not ok then
-        return { success = false, error = "shellExecute failed: " .. tostring(err) }
+        return { success = false, error = "shellExecute failed: " .. tostring(err), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true }
@@ -3712,16 +3725,16 @@ end
 -- Execute a no-return CE key API (keyDown / keyUp / doKeyPress) and return {success}.
 local function run_key_action(fn, vk, fn_name)
     local ok, err = pcall(fn, vk)
-    if not ok then return { success = false, error = fn_name .. " failed: " .. tostring(err) } end
+    if not ok then return { success = false, error = fn_name .. " failed: " .. tostring(err), error_code = "INTERNAL_ERROR" } end
     return { success = true }
 end
 
 function cmd_get_pixel(params)
     local x, y, err = parse_xy(params)
-    if err then return { success = false, error = err } end
+    if err then return { success = false, error = err, error_code = "INVALID_PARAMS" } end
 
     local ok, rgb = pcall(getPixel, x, y)
-    if not ok then return { success = false, error = "getPixel failed: " .. tostring(rgb) } end
+    if not ok then return { success = false, error = "getPixel failed: " .. tostring(rgb), error_code = "INTERNAL_ERROR" } end
     -- Windows COLORREF format: 0x00BBGGRR
     local r = rgb % 256
     local g = math.floor(rgb / 256) % 256
@@ -3731,43 +3744,43 @@ end
 
 function cmd_get_mouse_pos(params)
     local ok, x, y = pcall(getMousePos)
-    if not ok then return { success = false, error = "getMousePos failed: " .. tostring(x) } end
+    if not ok then return { success = false, error = "getMousePos failed: " .. tostring(x), error_code = "INTERNAL_ERROR" } end
     return { success = true, x = x, y = y }
 end
 
 function cmd_set_mouse_pos(params)
     local x, y, err = parse_xy(params)
-    if err then return { success = false, error = err } end
+    if err then return { success = false, error = err, error_code = "INVALID_PARAMS" } end
 
     local ok, e = pcall(setMousePos, x, y)
-    if not ok then return { success = false, error = "setMousePos failed: " .. tostring(e) } end
+    if not ok then return { success = false, error = "setMousePos failed: " .. tostring(e), error_code = "INTERNAL_ERROR" } end
     return { success = true }
 end
 
 function cmd_is_key_pressed(params)
     local vk, err = parse_vk(params)
-    if err then return { success = false, error = err } end
+    if err then return { success = false, error = err, error_code = "INVALID_PARAMS" } end
 
     local ok, pressed = pcall(isKeyPressed, vk)
-    if not ok then return { success = false, error = "isKeyPressed failed: " .. tostring(pressed) } end
+    if not ok then return { success = false, error = "isKeyPressed failed: " .. tostring(pressed), error_code = "INTERNAL_ERROR" } end
     return { success = true, pressed = pressed == true }
 end
 
 function cmd_key_down(params)
     local vk, err = parse_vk(params)
-    if err then return { success = false, error = err } end
+    if err then return { success = false, error = err, error_code = "INVALID_PARAMS" } end
     return run_key_action(keyDown, vk, "keyDown")
 end
 
 function cmd_key_up(params)
     local vk, err = parse_vk(params)
-    if err then return { success = false, error = err } end
+    if err then return { success = false, error = err, error_code = "INVALID_PARAMS" } end
     return run_key_action(keyUp, vk, "keyUp")
 end
 
 function cmd_do_key_press(params)
     local vk, err = parse_vk(params)
-    if err then return { success = false, error = err } end
+    if err then return { success = false, error = err, error_code = "INVALID_PARAMS" } end
     return run_key_action(doKeyPress, vk, "doKeyPress")
 end
 
@@ -3776,9 +3789,9 @@ function cmd_get_screen_info(params)
     local ok_h, height = pcall(getScreenHeight)
     local ok_d, dpi    = pcall(getScreenDPI)
 
-    if not ok_w then return { success = false, error = "getScreenWidth failed: " .. tostring(width) } end
-    if not ok_h then return { success = false, error = "getScreenHeight failed: " .. tostring(height) } end
-    if not ok_d then return { success = false, error = "getScreenDPI failed: " .. tostring(dpi) } end
+    if not ok_w then return { success = false, error = "getScreenWidth failed: " .. tostring(width), error_code = "INTERNAL_ERROR" } end
+    if not ok_h then return { success = false, error = "getScreenHeight failed: " .. tostring(height), error_code = "INTERNAL_ERROR" } end
+    if not ok_d then return { success = false, error = "getScreenDPI failed: " .. tostring(dpi), error_code = "INTERNAL_ERROR" } end
 
     return { success = true, width = width, height = height, dpi = dpi }
 end
@@ -3802,7 +3815,7 @@ function cmd_find_window(params)
     local class_name = params.class_name
 
     if not title and not class_name then
-        return { success = false, error = "At least one of title or class_name must be provided" }
+        return { success = false, error = "At least one of title or class_name must be provided", error_code = "INVALID_PARAMS" }
     end
 
     local ok, handle = pcall(function()
@@ -3810,7 +3823,7 @@ function cmd_find_window(params)
     end)
 
     if not ok then
-        return { success = false, error = tostring(handle) }
+        return { success = false, error = tostring(handle), error_code = "INTERNAL_ERROR" }
     end
 
     if not handle or handle == 0 then
@@ -3823,7 +3836,7 @@ end
 function cmd_get_window_caption(params)
     local handle = parseHandle(params.handle)
     if not handle then
-        return { success = false, error = "Invalid handle" }
+        return { success = false, error = "Invalid handle", error_code = "INVALID_PARAMS" }
     end
 
     local ok, caption = pcall(function()
@@ -3831,7 +3844,7 @@ function cmd_get_window_caption(params)
     end)
 
     if not ok then
-        return { success = false, error = tostring(caption) }
+        return { success = false, error = tostring(caption), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, caption = caption or "" }
@@ -3840,7 +3853,7 @@ end
 function cmd_get_window_class_name(params)
     local handle = parseHandle(params.handle)
     if not handle then
-        return { success = false, error = "Invalid handle" }
+        return { success = false, error = "Invalid handle", error_code = "INVALID_PARAMS" }
     end
 
     local ok, cls = pcall(function()
@@ -3848,7 +3861,7 @@ function cmd_get_window_class_name(params)
     end)
 
     if not ok then
-        return { success = false, error = tostring(cls) }
+        return { success = false, error = tostring(cls), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, class_name = cls or "" }
@@ -3857,7 +3870,7 @@ end
 function cmd_get_window_process_id(params)
     local handle = parseHandle(params.handle)
     if not handle then
-        return { success = false, error = "Invalid handle" }
+        return { success = false, error = "Invalid handle", error_code = "INVALID_PARAMS" }
     end
 
     local ok, pid = pcall(function()
@@ -3865,7 +3878,7 @@ function cmd_get_window_process_id(params)
     end)
 
     if not ok then
-        return { success = false, error = tostring(pid) }
+        return { success = false, error = tostring(pid), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, process_id = pid }
@@ -3874,7 +3887,7 @@ end
 function cmd_send_window_message(params)
     local handle = parseHandle(params.handle)
     if not handle then
-        return { success = false, error = "Invalid handle" }
+        return { success = false, error = "Invalid handle", error_code = "INVALID_PARAMS" }
     end
 
     local msg    = params.msg    or 0
@@ -3886,7 +3899,7 @@ function cmd_send_window_message(params)
     end)
 
     if not ok then
-        return { success = false, error = tostring(result) }
+        return { success = false, error = tostring(result), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, result = result or 0 }
@@ -3896,7 +3909,7 @@ end
 function cmd_show_message(params)
     local message = params.message
     if not message then
-        return { success = false, error = "message is required" }
+        return { success = false, error = "message is required", error_code = "INVALID_PARAMS" }
     end
 
     local ok, err = pcall(function()
@@ -3904,7 +3917,7 @@ function cmd_show_message(params)
     end)
 
     if not ok then
-        return { success = false, error = tostring(err) }
+        return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true }
@@ -3921,7 +3934,7 @@ function cmd_input_query(params)
     end)
 
     if not ok then
-        return { success = false, error = tostring(value) }
+        return { success = false, error = tostring(value), error_code = "INTERNAL_ERROR" }
     end
 
     -- inputQuery returns nil on cancel (CE contract)
@@ -3939,7 +3952,7 @@ function cmd_show_selection_list(params)
     local options = params.options
 
     if type(options) ~= "table" then
-        return { success = false, error = "options must be a list of strings" }
+        return { success = false, error = "options must be a list of strings", error_code = "INVALID_PARAMS" }
     end
 
     local sl = createStringlist()
@@ -3954,7 +3967,7 @@ function cmd_show_selection_list(params)
     sl.destroy()
 
     if not ok then
-        return { success = false, error = tostring(idx) }
+        return { success = false, error = tostring(idx), error_code = "INTERNAL_ERROR" }
     end
 
     if idx == nil or idx < 0 then
@@ -4014,7 +4027,7 @@ function cmd_aob_scan_unique(params)
         results = AOBScan(pattern, protection)
     end)
     if not scanOk then
-        return { success = false, error = "AOBScan failed: " .. tostring(scanMsg), error_code = "SCAN_ERROR" }
+        return { success = false, error = "AOBScan failed: " .. tostring(scanMsg), error_code = "INTERNAL_ERROR" }
     end
 
     local count = results and results.Count or 0
@@ -4066,7 +4079,7 @@ function cmd_aob_scan_module(params)
     local results
     local scanOk, scanMsg = pcall(function() results = AOBScan(pattern, protection) end)
     if not scanOk then
-        return { success = false, error = "AOBScan failed: " .. tostring(scanMsg), error_code = "SCAN_ERROR" }
+        return { success = false, error = "AOBScan failed: " .. tostring(scanMsg), error_code = "INTERNAL_ERROR" }
     end
 
     local addresses = {}
@@ -4138,7 +4151,7 @@ function cmd_pointer_rescan(params)
         return {
             success    = false,
             error      = "pointerRescan failed: " .. tostring(rescanMsg),
-            error_code = "SCAN_ERROR",
+            error_code = "INTERNAL_ERROR",
             note       = "A prior pointer scan must exist in CE before calling pointer_rescan"
         }
     end
@@ -4165,7 +4178,7 @@ function cmd_create_persistent_scan(params)
     local ms
     local msOk, msMsg = pcall(function() ms = createMemScan() end)
     if not msOk or not ms then
-        return { success = false, error = "createMemScan failed: " .. tostring(msMsg), error_code = "SCAN_ERROR" }
+        return { success = false, error = "createMemScan failed: " .. tostring(msMsg), error_code = "INTERNAL_ERROR" }
     end
 
     serverState.persistent_scans[name] = {
@@ -4217,7 +4230,7 @@ function cmd_persistent_scan_first_scan(params)
         ms.waitTillDone()
     end)
     if not fsOk then
-        return { success = false, error = "firstScan failed: " .. tostring(fsMsg), error_code = "SCAN_ERROR" }
+        return { success = false, error = "firstScan failed: " .. tostring(fsMsg), error_code = "INTERNAL_ERROR" }
     end
 
     if entry.fl then pcall(function() entry.fl.destroy() end) end
@@ -4227,7 +4240,7 @@ function cmd_persistent_scan_first_scan(params)
         fl.initialize()
     end)
     if not flOk then
-        return { success = false, error = "createFoundList failed: " .. tostring(flMsg), error_code = "SCAN_ERROR" }
+        return { success = false, error = "createFoundList failed: " .. tostring(flMsg), error_code = "INTERNAL_ERROR" }
     end
 
     entry.fl            = fl
@@ -4280,7 +4293,7 @@ function cmd_persistent_scan_next_scan(params)
         ms.waitTillDone()
     end)
     if not nsOk then
-        return { success = false, error = "nextScan failed: " .. tostring(nsMsg), error_code = "SCAN_ERROR" }
+        return { success = false, error = "nextScan failed: " .. tostring(nsMsg), error_code = "INTERNAL_ERROR" }
     end
 
     if entry.fl then pcall(function() entry.fl.destroy() end) end
@@ -4290,7 +4303,7 @@ function cmd_persistent_scan_next_scan(params)
         fl.initialize()
     end)
     if not flOk then
-        return { success = false, error = "createFoundList failed: " .. tostring(flMsg), error_code = "SCAN_ERROR" }
+        return { success = false, error = "createFoundList failed: " .. tostring(flMsg), error_code = "INTERNAL_ERROR" }
     end
 
     entry.fl = fl
@@ -4386,29 +4399,29 @@ end
 
 function cmd_copy_memory(params)
     local pid = getOpenedProcessID()
-    if not pid or pid == 0 then return { success = false, error = "No process attached" } end
+    if not pid or pid == 0 then return { success = false, error = "No process attached", error_code = "NO_PROCESS" } end
 
     local src = params.source
     local size = params.size
     local dest = params.dest  -- may be nil
     local method = params.method or 0
 
-    if not src then return { success = false, error = "Missing source address" } end
-    if not size or size <= 0 then return { success = false, error = "Missing or invalid size" } end
+    if not src then return { success = false, error = "Missing source address", error_code = "INVALID_PARAMS" } end
+    if not size or size <= 0 then return { success = false, error = "Missing or invalid size", error_code = "INVALID_PARAMS" } end
 
     if type(src) == "string" then src = getAddressSafe(src) end
-    if not src then return { success = false, error = "Invalid source address" } end
+    if not src then return { success = false, error = "Invalid source address", error_code = "INVALID_ADDRESS" } end
 
     local destAddr = nil
     if dest ~= nil then
         if type(dest) == "string" then destAddr = getAddressSafe(dest)
         else destAddr = dest end
-        if not destAddr then return { success = false, error = "Invalid dest address" } end
+        if not destAddr then return { success = false, error = "Invalid dest address", error_code = "INVALID_ADDRESS" } end
     end
 
     local ok, result = pcall(copyMemory, src, size, destAddr, method)
     if not ok or not result then
-        return { success = false, error = "copyMemory failed: " .. tostring(result) }
+        return { success = false, error = "copyMemory failed: " .. tostring(result), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, dest_address = toHex(result), size = size }
@@ -4416,25 +4429,25 @@ end
 
 function cmd_compare_memory(params)
     local pid = getOpenedProcessID()
-    if not pid or pid == 0 then return { success = false, error = "No process attached" } end
+    if not pid or pid == 0 then return { success = false, error = "No process attached", error_code = "NO_PROCESS" } end
 
     local addr1 = params.addr1
     local addr2 = params.addr2
     local size = params.size
     local method = params.method or 0
 
-    if not addr1 then return { success = false, error = "Missing addr1" } end
-    if not addr2 then return { success = false, error = "Missing addr2" } end
-    if not size or size <= 0 then return { success = false, error = "Missing or invalid size" } end
+    if not addr1 then return { success = false, error = "Missing addr1", error_code = "INVALID_PARAMS" } end
+    if not addr2 then return { success = false, error = "Missing addr2", error_code = "INVALID_PARAMS" } end
+    if not size or size <= 0 then return { success = false, error = "Missing or invalid size", error_code = "INVALID_PARAMS" } end
 
     if type(addr1) == "string" then addr1 = getAddressSafe(addr1) end
     if type(addr2) == "string" then addr2 = getAddressSafe(addr2) end
-    if not addr1 then return { success = false, error = "Invalid addr1" } end
-    if not addr2 then return { success = false, error = "Invalid addr2" } end
+    if not addr1 then return { success = false, error = "Invalid addr1", error_code = "INVALID_ADDRESS" } end
+    if not addr2 then return { success = false, error = "Invalid addr2", error_code = "INVALID_ADDRESS" } end
 
     local ok, r1, r2 = pcall(compareMemory, addr1, addr2, size, method)
     if not ok then
-        return { success = false, error = "compareMemory failed: " .. tostring(r1) }
+        return { success = false, error = "compareMemory failed: " .. tostring(r1), error_code = "INTERNAL_ERROR" }
     end
 
     if r1 == true then
@@ -4446,24 +4459,24 @@ end
 
 function cmd_write_region_to_file(params)
     local pid = getOpenedProcessID()
-    if not pid or pid == 0 then return { success = false, error = "No process attached" } end
+    if not pid or pid == 0 then return { success = false, error = "No process attached", error_code = "NO_PROCESS" } end
 
     local addr = params.address
     local size = params.size
     local filename = params.filename
 
     local sanitized, err = sanitizeFilename(filename)
-    if not sanitized then return { success = false, error = err } end
+    if not sanitized then return { success = false, error = err, error_code = "INVALID_PARAMS" } end
 
-    if not addr then return { success = false, error = "Missing address" } end
-    if not size or size <= 0 then return { success = false, error = "Missing or invalid size" } end
+    if not addr then return { success = false, error = "Missing address", error_code = "INVALID_PARAMS" } end
+    if not size or size <= 0 then return { success = false, error = "Missing or invalid size", error_code = "INVALID_PARAMS" } end
 
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     local ok, bytes_written = pcall(writeRegionToFile, sanitized, addr, size)
     if not ok then
-        return { success = false, error = "writeRegionToFile failed: " .. tostring(bytes_written) }
+        return { success = false, error = "writeRegionToFile failed: " .. tostring(bytes_written), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, bytes_written = bytes_written or 0, filename = sanitized }
@@ -4471,22 +4484,22 @@ end
 
 function cmd_read_region_from_file(params)
     local pid = getOpenedProcessID()
-    if not pid or pid == 0 then return { success = false, error = "No process attached" } end
+    if not pid or pid == 0 then return { success = false, error = "No process attached", error_code = "NO_PROCESS" } end
 
     local filename = params.filename
     local destination = params.destination
 
     local sanitized, err = sanitizeFilename(filename)
-    if not sanitized then return { success = false, error = err } end
+    if not sanitized then return { success = false, error = err, error_code = "INVALID_PARAMS" } end
 
-    if not destination then return { success = false, error = "Missing destination address" } end
+    if not destination then return { success = false, error = "Missing destination address", error_code = "INVALID_PARAMS" } end
 
     if type(destination) == "string" then destination = getAddressSafe(destination) end
-    if not destination then return { success = false, error = "Invalid destination address" } end
+    if not destination then return { success = false, error = "Invalid destination address", error_code = "INVALID_ADDRESS" } end
 
     local ok, bytes_read = pcall(readRegionFromFile, sanitized, destination)
     if not ok then
-        return { success = false, error = "readRegionFromFile failed: " .. tostring(bytes_read) }
+        return { success = false, error = "readRegionFromFile failed: " .. tostring(bytes_read), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, bytes_read = bytes_read or 0 }
@@ -4494,20 +4507,20 @@ end
 
 function cmd_md5_memory(params)
     local pid = getOpenedProcessID()
-    if not pid or pid == 0 then return { success = false, error = "No process attached" } end
+    if not pid or pid == 0 then return { success = false, error = "No process attached", error_code = "NO_PROCESS" } end
 
     local addr = params.address
     local size = params.size
 
-    if not addr then return { success = false, error = "Missing address" } end
-    if not size or size <= 0 then return { success = false, error = "Missing or invalid size" } end
+    if not addr then return { success = false, error = "Missing address", error_code = "INVALID_PARAMS" } end
+    if not size or size <= 0 then return { success = false, error = "Missing or invalid size", error_code = "INVALID_PARAMS" } end
 
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     local ok, result = pcall(md5memory, addr, size)
     if not ok or not result then
-        return { success = false, error = "md5memory failed: " .. tostring(result) }
+        return { success = false, error = "md5memory failed: " .. tostring(result), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, md5 = tostring(result) }
@@ -4517,11 +4530,11 @@ function cmd_md5_file(params)
     local filename = params.filename
 
     local sanitized, err = sanitizeFilename(filename)
-    if not sanitized then return { success = false, error = err } end
+    if not sanitized then return { success = false, error = err, error_code = "INVALID_PARAMS" } end
 
     local ok, result = pcall(md5file, sanitized)
     if not ok or not result then
-        return { success = false, error = "md5file failed: " .. tostring(result) }
+        return { success = false, error = "md5file failed: " .. tostring(result), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, md5 = tostring(result) }
@@ -4529,14 +4542,14 @@ end
 
 function cmd_create_section(params)
     local pid = getOpenedProcessID()
-    if not pid or pid == 0 then return { success = false, error = "No process attached" } end
+    if not pid or pid == 0 then return { success = false, error = "No process attached", error_code = "NO_PROCESS" } end
 
     local size = params.size
-    if not size or size <= 0 then return { success = false, error = "Missing or invalid size" } end
+    if not size or size <= 0 then return { success = false, error = "Missing or invalid size", error_code = "INVALID_PARAMS" } end
 
     local ok, handle = pcall(createSection, size)
     if not ok or not handle then
-        return { success = false, error = "createSection failed: " .. tostring(handle) }
+        return { success = false, error = "createSection failed: " .. tostring(handle), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, handle = toHex(handle) }
@@ -4544,21 +4557,21 @@ end
 
 function cmd_map_view_of_section(params)
     local pid = getOpenedProcessID()
-    if not pid or pid == 0 then return { success = false, error = "No process attached" } end
+    if not pid or pid == 0 then return { success = false, error = "No process attached", error_code = "NO_PROCESS" } end
 
     local handle = params.handle
     local address = params.address  -- optional preferred base
 
-    if not handle then return { success = false, error = "Missing handle" } end
+    if not handle then return { success = false, error = "Missing handle", error_code = "INVALID_PARAMS" } end
 
     if type(handle) == "string" then handle = tonumber(handle, 16) end
-    if not handle then return { success = false, error = "Invalid handle" } end
+    if not handle then return { success = false, error = "Invalid handle", error_code = "INVALID_PARAMS" } end
 
     local prefAddr = nil
     if address ~= nil then
         if type(address) == "string" then prefAddr = getAddressSafe(address)
         else prefAddr = address end
-        if not prefAddr then return { success = false, error = "Invalid address" } end
+        if not prefAddr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
     end
 
     local ok, mapped
@@ -4569,7 +4582,7 @@ function cmd_map_view_of_section(params)
     end
 
     if not ok or not mapped then
-        return { success = false, error = "mapViewOfSection failed: " .. tostring(mapped) }
+        return { success = false, error = "mapViewOfSection failed: " .. tostring(mapped), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, mapped_address = toHex(mapped) }
@@ -4761,23 +4774,23 @@ function cmd_assemble_instruction(params)
     local skipRangeCheck = params.skip_range_check or false
 
     if not line or line == "" then
-        return { success = false, error = "No instruction line provided" }
+        return { success = false, error = "No instruction line provided", error_code = "INVALID_PARAMS" }
     end
 
     if type(address) == "string" then address = getAddressSafe(address) end
     if address == nil and params.address ~= nil then
-        return { success = false, error = "Invalid address: " .. tostring(params.address) }
+        return { success = false, error = "Invalid address: " .. tostring(params.address), error_code = "INVALID_ADDRESS" }
     end
 
     -- assemble() accepts nil address; it skips relative-offset resolution in that case
     local asmOk, result = pcall(assemble, line, address, preference, skipRangeCheck)
 
     if not asmOk then
-        return { success = false, error = "assemble() raised error: " .. tostring(result) }
+        return { success = false, error = "assemble() raised error: " .. tostring(result), error_code = "INTERNAL_ERROR" }
     end
 
     if not result then
-        return { success = false, error = "assemble() returned nil (invalid instruction or address)" }
+        return { success = false, error = "assemble() returned nil (invalid instruction or address)", error_code = "INVALID_PARAMS" }
     end
 
     local bytes = {}
@@ -4793,13 +4806,13 @@ function cmd_auto_assemble_check(params)
     local targetSelf = params.target_self or false
 
     if not script or script == "" then
-        return { success = false, error = "No script provided" }
+        return { success = false, error = "No script provided", error_code = "INVALID_PARAMS" }
     end
 
     local checkOk, valid, errMsg = pcall(autoAssembleCheck, script, enable, targetSelf)
 
     if not checkOk then
-        return { success = false, valid = false, errors = { tostring(valid) } }
+        return { success = false, valid = false, errors = { tostring(valid) }, error = "autoAssembleCheck raised: " .. tostring(valid), error_code = "INTERNAL_ERROR" }
     end
 
     if valid then
@@ -4819,7 +4832,7 @@ function cmd_compile_c_code(params)
     local kernelMode = params.kernelmode or false
 
     if not source or source == "" then
-        return { success = false, error = "No source code provided" }
+        return { success = false, error = "No source code provided", error_code = "INVALID_PARAMS" }
     end
 
     if type(compile) ~= "function" then
@@ -4828,19 +4841,19 @@ function cmd_compile_c_code(params)
 
     if type(address) == "string" then address = getAddressSafe(address) end
     if address == nil and params.address ~= nil then
-        return { success = false, error = "Invalid address: " .. tostring(params.address) }
+        return { success = false, error = "Invalid address: " .. tostring(params.address), error_code = "INVALID_ADDRESS" }
     end
 
     local compOk, symbols, errMsg = pcall(compile, source, address, targetSelf, kernelMode, false)
 
     if not compOk then
-        return { success = false, symbols = {}, errors = { tostring(symbols) } }
+        return { success = false, symbols = {}, errors = { tostring(symbols) }, error = "compile raised: " .. tostring(symbols), error_code = "INTERNAL_ERROR" }
     end
 
     if not symbols then
         local errors = {}
         if errMsg then table.insert(errors, tostring(errMsg)) end
-        return { success = false, symbols = {}, errors = errors }
+        return { success = false, symbols = {}, errors = errors, error = "Compilation failed" .. (errMsg and (": " .. tostring(errMsg)) or ""), error_code = "INVALID_PARAMS" }
     end
 
     local symResult = {}
@@ -4857,7 +4870,7 @@ function cmd_compile_cs_code(params)
     local coreAssembly = params.core_assembly
 
     if not source or source == "" then
-        return { success = false, error = "No source code provided" }
+        return { success = false, error = "No source code provided", error_code = "INVALID_PARAMS" }
     end
 
     if type(compileCS) ~= "function" then
@@ -4868,11 +4881,11 @@ function cmd_compile_cs_code(params)
     local csOk, result = pcall(compileCS, source, references, coreAssembly)
 
     if not csOk then
-        return { success = false, assembly_handle = nil, error = tostring(result) }
+        return { success = false, assembly_handle = nil, error = tostring(result), error_code = "INTERNAL_ERROR" }
     end
 
     if not result then
-        return { success = false, assembly_handle = nil, error = "compileCS returned nil" }
+        return { success = false, assembly_handle = nil, error = "compileCS returned nil", error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, assembly_handle = tostring(result) }
@@ -4886,14 +4899,14 @@ function cmd_generate_api_hook_script(params)
     local targetAddress = params.target_address
     local codeToExecute = params.code_to_execute or ""
 
-    if not address then return { success = false, error = "No address provided" } end
-    if not targetAddress then return { success = false, error = "No target_address provided" } end
+    if not address then return { success = false, error = "No address provided", error_code = "INVALID_PARAMS" } end
+    if not targetAddress then return { success = false, error = "No target_address provided", error_code = "INVALID_PARAMS" } end
 
     if type(address) == "string" then address = getAddressSafe(address) end
     if type(targetAddress) == "string" then targetAddress = getAddressSafe(targetAddress) end
 
-    if not address then return { success = false, error = "Invalid address: " .. tostring(params.address) } end
-    if not targetAddress then return { success = false, error = "Invalid target_address: " .. tostring(params.target_address) } end
+    if not address then return { success = false, error = "Invalid address: " .. tostring(params.address), error_code = "INVALID_ADDRESS" } end
+    if not targetAddress then return { success = false, error = "Invalid target_address: " .. tostring(params.target_address), error_code = "INVALID_ADDRESS" } end
 
     -- CE signature: generateAPIHookScript(address, addresstojumpto, addresstogetnewcalladdress OPT, ext OPT, targetself OPT)
     -- code_to_execute maps to ext (4th param); 3rd param (new-call-address) is unused here
@@ -4901,11 +4914,11 @@ function cmd_generate_api_hook_script(params)
     local genOk, result = pcall(generateAPIHookScript, address, targetAddress, nil, ext)
 
     if not genOk then
-        return { success = false, error = "generateAPIHookScript failed: " .. tostring(result) }
+        return { success = false, error = "generateAPIHookScript failed: " .. tostring(result), error_code = "INTERNAL_ERROR" }
     end
 
     if not result then
-        return { success = false, error = "generateAPIHookScript returned nil" }
+        return { success = false, error = "generateAPIHookScript returned nil", error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, script = tostring(result) }
@@ -4916,10 +4929,10 @@ function cmd_generate_code_injection_script(params)
     if not ok then return err end
 
     local address = params.address
-    if not address then return { success = false, error = "No address provided" } end
+    if not address then return { success = false, error = "No address provided", error_code = "INVALID_PARAMS" } end
 
     if type(address) == "string" then address = getAddressSafe(address) end
-    if not address then return { success = false, error = "Invalid address: " .. tostring(params.address) } end
+    if not address then return { success = false, error = "Invalid address: " .. tostring(params.address), error_code = "INVALID_ADDRESS" } end
 
     -- generateCodeInjectionScript(script: TStrings, address, farjmp) mutates TStrings in-place
     local sl = createStringlist()
@@ -4927,14 +4940,14 @@ function cmd_generate_code_injection_script(params)
 
     if not genOk then
         sl.destroy()
-        return { success = false, error = "generateCodeInjectionScript failed: " .. tostring(genErr) }
+        return { success = false, error = "generateCodeInjectionScript failed: " .. tostring(genErr), error_code = "INTERNAL_ERROR" }
     end
 
     local script = sl.Text
     sl.destroy()
 
     if not script or script == "" then
-        return { success = false, error = "generateCodeInjectionScript produced empty script" }
+        return { success = false, error = "generateCodeInjectionScript produced empty script", error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, script = script }
@@ -4958,7 +4971,7 @@ function cmd_debug_get_context(params)
 
     local callOk, callErr = pcall(debug_getContext, extraRegs)
     if not callOk then
-        return { success = false, error = "debug_getContext failed: " .. tostring(callErr), error_code = "CE_API_ERROR" }
+        return { success = false, error = "debug_getContext failed: " .. tostring(callErr), error_code = "INTERNAL_ERROR" }
     end
 
     -- captureRegisters() reads the same CE globals that debug_getContext just populated
@@ -5021,7 +5034,7 @@ function cmd_debug_set_context(params)
 
     local setOk, setErr = pcall(debug_setContext)
     if not setOk then
-        return { success = false, error = "debug_setContext failed: " .. tostring(setErr), error_code = "CE_API_ERROR" }
+        return { success = false, error = "debug_setContext failed: " .. tostring(setErr), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true }
@@ -5035,7 +5048,7 @@ function cmd_debug_get_xmm_pointer(params)
 
     local ptrOk, ptr = pcall(debug_getXMMPointer, xmmNr)
     if not ptrOk then
-        return { success = false, error = "debug_getXMMPointer failed: " .. tostring(ptr), error_code = "CE_API_ERROR" }
+        return { success = false, error = "debug_getXMMPointer failed: " .. tostring(ptr), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, xmm_nr = xmmNr, pointer = toHex(ptr) }
@@ -5060,7 +5073,7 @@ function cmd_debug_set_last_branch_recording(params)
 
     local lbrOk, lbrErr = pcall(debug_setLastBranchRecording, enable)
     if not lbrOk then
-        return { success = false, error = "debug_setLastBranchRecording failed: " .. tostring(lbrErr), error_code = "CE_API_ERROR" }
+        return { success = false, error = "debug_setLastBranchRecording failed: " .. tostring(lbrErr), error_code = "INTERNAL_ERROR" }
     end
 
     return { success = true, enabled = enable }
@@ -5074,11 +5087,11 @@ function cmd_debug_get_last_branch_record(params)
 
     local recOk, record = pcall(debug_getLastBranchRecord, index)
     if not recOk then
-        return { success = false, error = "debug_getLastBranchRecord failed: " .. tostring(record), error_code = "CE_API_ERROR" }
+        return { success = false, error = "debug_getLastBranchRecord failed: " .. tostring(record), error_code = "INTERNAL_ERROR" }
     end
 
     if type(record) ~= "table" then
-        return { success = false, error = "Unexpected return from debug_getLastBranchRecord: " .. tostring(record), error_code = "CE_API_ERROR" }
+        return { success = false, error = "Unexpected return from debug_getLastBranchRecord: " .. tostring(record), error_code = "INTERNAL_ERROR" }
     end
 
     return {
@@ -5130,7 +5143,7 @@ function cmd_debug_set_breakpoint_for_thread(params)
 
     if not setOk then
         serverState.breakpoint_hits[bpHandle] = nil
-        return { success = false, error = "debug_setBreakpointForThread failed: " .. tostring(setErr), error_code = "CE_API_ERROR" }
+        return { success = false, error = "debug_setBreakpointForThread failed: " .. tostring(setErr), error_code = "INTERNAL_ERROR" }
     end
 
     serverState.breakpoints[bpHandle] = { address = addr, type = "thread_bp", thread_id = threadId, max_hits = maxHits }
@@ -5161,7 +5174,7 @@ function cmd_debug_remove_breakpoint_for_thread(params)
     -- CE has no dedicated per-thread remove; debug_removeBreakpoint by address is the supported path
     local remOk, remErr = pcall(debug_removeBreakpoint, addr)
     if not remOk then
-        return { success = false, error = "debug_removeBreakpoint failed: " .. tostring(remErr), error_code = "CE_API_ERROR" }
+        return { success = false, error = "debug_removeBreakpoint failed: " .. tostring(remErr), error_code = "INTERNAL_ERROR" }
     end
 
     local bpHandle = "thread_" .. tostring(threadId) .. "_" .. toHex(addr)
@@ -5207,13 +5220,13 @@ local DEBUGGER_INTERFACE_CURRENT_NAME = {
 function cmd_debug_process(params)
     local pid = getOpenedProcessID()
     if not pid or pid == 0 then
-        return { success = false, error = "No process attached" }
+        return { success = false, error = "No process attached", error_code = "NO_PROCESS" }
     end
     local iface = params.interface or 0
     if type(iface) ~= "number" then iface = tonumber(iface) or 0 end
     local ok, err = pcall(debugProcess, iface)
     if not ok then
-        return { success = false, error = tostring(err) }
+        return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" }
     end
     return {
         success = true,
@@ -5225,7 +5238,7 @@ end
 function cmd_debug_is_debugging(params)
     local ok, result = pcall(debug_isDebugging)
     if not ok then
-        return { success = false, error = tostring(result) }
+        return { success = false, error = tostring(result), error_code = "INTERNAL_ERROR" }
     end
     return { success = true, is_debugging = result == true }
 end
@@ -5233,7 +5246,7 @@ end
 function cmd_debug_get_current_debugger_interface(params)
     local ok, iface = pcall(debug_getCurrentDebuggerInterface)
     if not ok then
-        return { success = false, error = tostring(iface) }
+        return { success = false, error = tostring(iface), error_code = "INTERNAL_ERROR" }
     end
     local ifaceName = iface ~= nil
         and (DEBUGGER_INTERFACE_CURRENT_NAME[iface] or ("unknown_" .. tostring(iface)))
@@ -5249,7 +5262,7 @@ end
 local function requireDebugger()
     local ok, isDbg = pcall(debug_isDebugging)
     if not ok or not isDbg then
-        return { success = false, error = "Debugger is not attached" }
+        return { success = false, error = "Debugger is not attached", error_code = "CE_API_UNAVAILABLE" }
     end
 end
 
@@ -5257,10 +5270,10 @@ end
 local function callWithProcessGuard(fn)
     local pid = getOpenedProcessID()
     if not pid or pid == 0 then
-        return { success = false, error = "No process attached" }
+        return { success = false, error = "No process attached", error_code = "NO_PROCESS" }
     end
     local ok, err = pcall(fn)
-    if not ok then return { success = false, error = tostring(err) } end
+    if not ok then return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" } end
     return { success = true }
 end
 
@@ -5270,10 +5283,10 @@ function cmd_debug_break_thread(params)
     local tid = params.thread_id
     if type(tid) ~= "number" then tid = tonumber(tid) end
     if not tid then
-        return { success = false, error = "Missing required param: thread_id" }
+        return { success = false, error = "Missing required param: thread_id", error_code = "INVALID_PARAMS" }
     end
     local ok, err = pcall(debug_breakThread, tid)
-    if not ok then return { success = false, error = tostring(err) } end
+    if not ok then return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" } end
     return { success = true }
 end
 
@@ -5290,16 +5303,16 @@ function cmd_debug_continue(params)
     elseif method == "step_over" then
         ceMethod = co_stepover
     else
-        return { success = false, error = "Unknown method: " .. tostring(method) .. ". Valid: run, step_into, step_over" }
+        return { success = false, error = "Unknown method: " .. tostring(method) .. ". Valid: run, step_into, step_over", error_code = "INVALID_PARAMS" }
     end
     local ok, err = pcall(debug_continueFromBreakpoint, ceMethod)
-    if not ok then return { success = false, error = tostring(err) } end
+    if not ok then return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" } end
     return { success = true }
 end
 
 function cmd_debug_detach(params)
     local ok, result = pcall(detachIfPossible)
-    if not ok then return { success = false, error = tostring(result) } end
+    if not ok then return { success = false, error = tostring(result), error_code = "INTERNAL_ERROR" } end
     return { success = true, detached = result == true }
 end
 
@@ -5319,12 +5332,12 @@ local unpack = unpack or table.unpack
 function cmd_inject_dll(params)
     local ok, err = requireProcess(); if not ok then return err end
     local filepath = params.filepath
-    if not filepath then return { success = false, error = "No filepath provided" } end
+    if not filepath then return { success = false, error = "No filepath provided", error_code = "INVALID_PARAMS" } end
     local skip = params.skip_symbol_reload or false
 
     local ok, result = pcall(injectDLL, filepath, skip)
     if not ok then
-        return { success = false, error = "injectDLL failed: " .. tostring(result) }
+        return { success = false, error = "injectDLL failed: " .. tostring(result), error_code = "INTERNAL_ERROR" }
     end
     return { success = result == true }
 end
@@ -5338,13 +5351,13 @@ function cmd_inject_dotnet_dll(params)
     local timeout    = params.timeout
     if timeout == nil then timeout = -1 end
 
-    if not dllpath    then return { success = false, error = "No filepath provided" } end
-    if not className  then return { success = false, error = "No class_name provided" } end
-    if not methodName then return { success = false, error = "No method_name provided" } end
+    if not dllpath    then return { success = false, error = "No filepath provided", error_code = "INVALID_PARAMS" } end
+    if not className  then return { success = false, error = "No class_name provided", error_code = "INVALID_PARAMS" } end
+    if not methodName then return { success = false, error = "No method_name provided", error_code = "INVALID_PARAMS" } end
 
     local ok, result = pcall(injectDotNetDLL, dllpath, className, methodName, param, timeout)
     if not ok then
-        return { success = false, error = "injectDotNetDLL failed: " .. tostring(result) }
+        return { success = false, error = "injectDotNetDLL failed: " .. tostring(result), error_code = "INTERNAL_ERROR" }
     end
     return { success = true, result = result }
 end
@@ -5353,7 +5366,7 @@ function cmd_execute_code(params)
     local ok, err = requireProcess(); if not ok then return err end
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     local param   = params.param   or 0
     local timeout = params.timeout
@@ -5361,7 +5374,7 @@ function cmd_execute_code(params)
 
     local ok, retval = pcall(executeCode, addr, param, timeout)
     if not ok then
-        return { success = false, error = "executeCode failed: " .. tostring(retval) }
+        return { success = false, error = "executeCode failed: " .. tostring(retval), error_code = "INTERNAL_ERROR" }
     end
     return { success = true, return_value = retval }
 end
@@ -5370,7 +5383,7 @@ function cmd_execute_code_ex(params)
     local ok, err = requireProcess(); if not ok then return err end
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     local callMethod = params.call_method or 0
     local timeout    = params.timeout
@@ -5379,7 +5392,7 @@ function cmd_execute_code_ex(params)
 
     local ok, retval = pcall(executeCodeEx, callMethod, timeout, addr, unpack(args))
     if not ok then
-        return { success = false, error = "executeCodeEx failed: " .. tostring(retval) }
+        return { success = false, error = "executeCodeEx failed: " .. tostring(retval), error_code = "INTERNAL_ERROR" }
     end
     return { success = true, return_value = retval }
 end
@@ -5388,7 +5401,7 @@ function cmd_execute_method(params)
     local ok, err = requireProcess(); if not ok then return err end
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     local instance = params.instance
     if type(instance) == "string" then instance = getAddressSafe(instance) end
@@ -5400,7 +5413,7 @@ function cmd_execute_method(params)
 
     local ok, retval = pcall(executeMethod, callMethod, timeout, addr, instance, unpack(args))
     if not ok then
-        return { success = false, error = "executeMethod failed: " .. tostring(retval) }
+        return { success = false, error = "executeMethod failed: " .. tostring(retval), error_code = "INTERNAL_ERROR" }
     end
     return { success = true, return_value = retval }
 end
@@ -5409,13 +5422,13 @@ end
 function cmd_execute_code_local(params)
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     local param = params.param or 0
 
     local ok, retval = pcall(executeCodeLocal, addr, param)
     if not ok then
-        return { success = false, error = "executeCodeLocal failed: " .. tostring(retval) }
+        return { success = false, error = "executeCodeLocal failed: " .. tostring(retval), error_code = "INTERNAL_ERROR" }
     end
     return { success = true, return_value = retval }
 end
@@ -5424,14 +5437,14 @@ end
 function cmd_execute_code_local_ex(params)
     local addr = params.address
     if type(addr) == "string" then addr = getAddressSafe(addr) end
-    if not addr then return { success = false, error = "Invalid address" } end
+    if not addr then return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" } end
 
     local callMethod = params.call_method or 0
     local args = params.args or {}
 
     local ok, retval = pcall(executeCodeLocalEx, callMethod, addr, unpack(args))
     if not ok then
-        return { success = false, error = "executeCodeLocalEx failed: " .. tostring(retval) }
+        return { success = false, error = "executeCodeLocalEx failed: " .. tostring(retval), error_code = "INTERNAL_ERROR" }
     end
     return { success = true, return_value = retval }
 end
@@ -5646,15 +5659,15 @@ end
 
 function cmd_open_process(params)
     local target = params.process_id_or_name
-    if not target then return { success = false, error = "Missing process_id_or_name" } end
+    if not target then return { success = false, error = "Missing process_id_or_name", error_code = "INVALID_PARAMS" } end
 
     local numeric = tonumber(target)
     local ok, err = pcall(openProcess, numeric or target)
-    if not ok then return { success = false, error = tostring(err) } end
+    if not ok then return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" } end
 
     local ok2, pid = pcall(getOpenedProcessID)
     if not ok2 or not pid or pid == 0 then
-        return { success = false, error = "Process not found or could not be opened" }
+        return { success = false, error = "Process not found or could not be opened", error_code = "NOT_FOUND" }
     end
 
     local name = (process ~= "" and process) or tostring(target)
@@ -5663,7 +5676,7 @@ end
 
 function cmd_get_process_list(params)
     local ok, list = pcall(getProcesslist)
-    if not ok then return { success = false, error = tostring(list) } end
+    if not ok then return { success = false, error = tostring(list), error_code = "INTERNAL_ERROR" } end
 
     local processes = {}
     if list then
@@ -5690,10 +5703,10 @@ end
 
 function cmd_get_processid_from_name(params)
     local name = params.name
-    if not name then return { success = false, error = "Missing name" } end
+    if not name then return { success = false, error = "Missing name", error_code = "INVALID_PARAMS" } end
 
     local ok, pid = pcall(getProcessIDFromProcessName, name)
-    if not ok then return { success = false, error = tostring(pid) } end
+    if not ok then return { success = false, error = tostring(pid), error_code = "INTERNAL_ERROR" } end
     if not pid or pid == 0 then
         return { success = false, error = "Process not found", error_code = "NOT_FOUND" }
     end
@@ -5703,7 +5716,7 @@ end
 
 function cmd_get_foreground_process(params)
     local ok, pid = pcall(getForegroundProcess)
-    if not ok then return { success = false, error = tostring(pid) } end
+    if not ok then return { success = false, error = tostring(pid), error_code = "INTERNAL_ERROR" } end
 
     local hwnd = 0
     local ok2, wh = pcall(getForegroundWindow)
@@ -5714,13 +5727,13 @@ end
 
 function cmd_create_process(params)
     local path = params.path
-    if not path then return { success = false, error = "Missing path" } end
+    if not path then return { success = false, error = "Missing path", error_code = "INVALID_PARAMS" } end
     local args = params.args or ""
     local debug_flag = params.debug or false
     local break_on_entry = params.break_on_entry or false
 
     local ok, err = pcall(createProcess, path, args, debug_flag, break_on_entry)
-    if not ok then return { success = false, error = tostring(err) } end
+    if not ok then return { success = false, error = tostring(err), error_code = "INTERNAL_ERROR" } end
 
     local ok2, pid = pcall(getOpenedProcessID)
     local result_pid = (ok2 and pid) or 0
@@ -5730,7 +5743,7 @@ end
 
 function cmd_get_opened_process_id(params)
     local ok, pid = pcall(getOpenedProcessID)
-    if not ok then return { success = false, error = tostring(pid) } end
+    if not ok then return { success = false, error = tostring(pid), error_code = "INTERNAL_ERROR" } end
     if not pid or pid == 0 then
         return { success = false, error = "No process attached", error_code = "NO_PROCESS" }
     end
@@ -5739,7 +5752,7 @@ end
 
 function cmd_get_opened_process_handle(params)
     local ok, handle = pcall(getOpenedProcessHandle)
-    if not ok then return { success = false, error = tostring(handle) } end
+    if not ok then return { success = false, error = tostring(handle), error_code = "INTERNAL_ERROR" } end
     return { success = true, handle = toHex(handle or 0) }
 end
 

@@ -113,3 +113,13 @@ def test_shell_opt_in_is_captured_at_load_time():
     late = Bridge(prelude=b"function runCommand(c, a) return 'out', 0 end")
     late.result("evaluate_lua", code="CE_MCP_ALLOW_SHELL = true")  # flipping the global after load...
     assert late.result("run_command", command="whoami")["error_code"] == "PERMISSION_DENIED"  # ...does nothing
+
+
+def test_error_codes_on_common_failures(bridge):
+    assert bridge.result("read_integer", address="zz")["error_code"] == "INVALID_ADDRESS"
+    bridge.G[b"MEM"][b"i" + str(0x9000).encode()] = None
+    assert bridge.result("read_integer", address="0x9000", type="dword")["error_code"] == "INVALID_ADDRESS"
+    assert bridge.result("read_integer", address="0x9000", type="nibble")["error_code"] == "INVALID_PARAMS"
+    assert bridge.result("remove_breakpoint", id="nope")["error_code"] == "NOT_FOUND"
+    assert bridge.result("md5_file", filename="..\\x")["error_code"] == "INVALID_PARAMS"
+    assert bridge.result("evaluate_lua", code="return (")["error_code"] == "INVALID_PARAMS"

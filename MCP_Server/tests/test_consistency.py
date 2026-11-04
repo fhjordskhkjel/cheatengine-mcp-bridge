@@ -62,3 +62,46 @@ def test_claude_md_and_agents_md_in_sync():
     claude = (REPO / "CLAUDE.md").read_text(encoding="utf-8").splitlines()
     agents = (REPO / "AGENTS.md").read_text(encoding="utf-8").splitlines()
     assert claude[3:] == agents[3:], "CLAUDE.md and AGENTS.md diverged; apply the same edit to both"
+
+
+ERROR_CODES = {"NO_PROCESS", "INVALID_ADDRESS", "INVALID_PARAMS", "CE_API_UNAVAILABLE", "DBVM_NOT_LOADED",
+               "DBK_NOT_LOADED", "PERMISSION_DENIED", "NOT_FOUND", "OUT_OF_RESOURCES", "INTERNAL_ERROR"}
+
+
+def _failure_tables(src):
+    """Yield (line, text) for each Lua table constructor containing `success = false`."""
+    for m in re.finditer(r"success\s*=\s*false", src):
+        depth, i = 0, m.start()
+        while i > 0:  # back to the enclosing '{'
+            i -= 1
+            if src[i] == "}":
+                depth += 1
+            elif src[i] == "{":
+                if depth == 0:
+                    break
+                depth -= 1
+        depth, j = 0, i
+        while j < len(src):  # forward to its '}', skipping string literals
+            c = src[j]
+            if c in "\"'":
+                j += 1
+                while j < len(src) and src[j] != c:
+                    j += 2 if src[j] == "\\" else 1
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        yield src.count("\n", 0, i) + 1, src[i:j + 1]
+
+
+def test_every_lua_failure_has_an_error_code():
+    bare = [line for line, table in _failure_tables(LUA) if "error_code" not in table]
+    assert not bare, f"success = false without error_code at ce_mcp_bridge.lua lines {bare}"
+
+
+def test_error_codes_are_from_the_enum():
+    used = set(re.findall(r'error_code\s*=\s*"([A-Z_]+)"', LUA)) | set(re.findall(r'"error_code":\s*"([A-Z_]+)"', PY))
+    assert used <= ERROR_CODES, f"error codes outside the CLAUDE.md enum: {sorted(used - ERROR_CODES)}"
