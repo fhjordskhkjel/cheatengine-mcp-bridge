@@ -19,7 +19,7 @@ Covers [#1](https://github.com/fhjordskhkjel/cheatengine-mcp-bridge/pull/1), [#2
 
 ### Added
 
-- **`CE_MCP_PROFILE`** (`readonly` / `standard` / `full`, default `full`). Every tool declares an access class (`read`, `analysis`, `write`, `exec`); the profile registers only the allowed classes. `readonly` (106 tools) never touches the target or the host.
+- **`CE_MCP_PROFILE`** (`readonly` / `standard` / `full`, default `full`). Every tool declares an access class (`read`, `analysis`, `write`, `exec`); the profile registers only the allowed classes. `readonly` (105 tools) never touches the target or the host.
 - **MCP tool annotations** derived from the access class: `readOnlyHint`, `destructiveHint`, `openWorldHint`.
 - **`CE_MCP_AUDIT_LOG=<path>`**: a JSON-lines record of every command (time, method, bounded parameters, outcome, error code, duration), including shell calls blocked by the gate.
 - **`CE_MCP_TOOLSETS`** (comma-separated groups, default `all`) to cut the tool-schema context cost, and the **`list_toolsets`** tool, which explains which tools are disabled and why.

@@ -19,7 +19,7 @@ def test_every_tool_has_an_access_class():
 
 
 @pytest.mark.parametrize("name", [
-    "evaluate_lua", "auto_assemble", "compile_c_code", "compile_cs_code", "create_thread",
+    "evaluate_lua", "auto_assemble", "auto_assemble_check", "compile_c_code", "compile_cs_code", "create_thread",
     "queue_to_main_thread", "inject_dll", "inject_dotnet_dll", "execute_code", "execute_code_ex",
     "execute_method", "execute_code_local", "execute_code_local_ex", "run_command", "shell_execute",
     "create_process", "load_table",

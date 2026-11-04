@@ -1454,13 +1454,17 @@ def assemble_instruction(
     return format_result(ce_client.send_command("assemble_instruction", params))
 
 
-@tool("scripting", "read")
+@tool("scripting", "exec")
 def auto_assemble_check(
     script: str,
     enable: bool = True,
     target_self: bool = False,
 ) -> str:
-    """Validate an Auto Assembler script for syntax errors without executing it.
+    """Validate an Auto Assembler script for syntax errors without assembling it.
+
+    SECURITY: classified `exec`. Cheat Engine still runs `{$lua}` blocks (and
+    registered AA command hooks) during a syntax check, so a script can run
+    arbitrary Lua even here.
 
     Returns {success, valid: bool, errors: [str]}.
     enable: True checks the [Enable] section; False checks [Disable].
