@@ -133,7 +133,7 @@ eq("...and nothing was registered or armed", #cmd_list_breakpoints({}).breakpoin
 cmd_set_breakpoint({ address = 0x4100, id = "sb", condition = "os == nil and io == nil and load == nil and _G == nil and require == nil" })
 FIRE(0x4100, {})
 eq("sandbox: no os/io/load/_G/require inside conditions", #hitsOf("sb"), 1)
-cmd_set_breakpoint({ address = 0x4200, id = "esc", condition = "os.execute('echo pwned')" })
+cmd_set_breakpoint({ address = 0x4200, id = "esc", condition = "os.execute(1)" })
 FIRE(0x4200, {})
 eq("a condition that errors still records the hit, flagged", #hitsOf("esc") == 1 and hitsOf("esc")[1].condition_error ~= nil, true)
 cmd_set_breakpoint({ address = 0x4300, id = "loop", condition = "(function() while true do end end)()" })
@@ -144,6 +144,19 @@ for _ = 1, 5 do FIRE(0x4300, {}) end
 eq("a condition that keeps failing is switched off", listed("loop").condition_disabled, true)
 cmd_set_breakpoint({ address = 0x4400, id = "ok", condition = "RAX == 1" })
 eq("long conditions are refused", cmd_set_breakpoint({ address = 0x4500, condition = string.rep("1", 600) }).error_code, "INVALID_PARAMS")
+-- The string metatable is reachable from any string value, so a string literal or `..` would give a condition
+-- string.rep (a gigabyte per hit, in one C call the instruction budget cannot interrupt).
+for i, expr in ipairs({ "#(('a'):rep(1 << 30)) > 0", '("a"):rep(8) ~= nil', "(1 .. 2).rep(1 .. 2, 1 << 30) ~= nil",
+                        "[[a]] ~= nil", "RAX == 1 --[[ ]] or ('a'):rep(9) ~= nil" }) do
+    r = cmd_set_breakpoint({ address = 0x4600 + i, condition = expr })
+    eq("string-making condition is refused: " .. expr, r.error_code == "INVALID_PARAMS" and r.error:find("not allowed", 1, true) ~= nil
+       and BPS[0x4600 + i] == nil, true)
+end
+r = cmd_set_breakpoint({ address = 0x4700, id = "insp", mode = "break", inspect = { { expr = "('a'):rep(8)", size = 8 } } })
+eq("...and so is one in an inspect expression", r.error_code, "INVALID_PARAMS")
+reset()                                                  -- free the four debug registers
+eq("numeric conditions with floats, hex and comparisons still compile",
+   cmd_set_breakpoint({ address = 0x4800, id = "num", condition = "f32(RSP) > 1.5 and RAX ~= 0x10 and RCX // 2 == 3" }).success, true)
 reset()
 
 -- ===================== stop_after_hits =====================

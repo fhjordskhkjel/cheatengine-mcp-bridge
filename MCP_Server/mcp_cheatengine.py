@@ -1221,8 +1221,9 @@ def set_breakpoint(address: str, id: str = None, capture_registers: bool = True,
             report the overflow.
         condition: Record only hits where this is true, e.g. "RAX == 5", "u32(RDX+8) == 0x1234 and RCX ~= 0". Sees the
                    registers, memory readers u8..u64 i8..i64 f32 f64 ptr (nil if unreadable), hits(), seen(),
-                   abs/min/max/floor; nothing else. Runs under an instruction budget; an erroring condition records
-                   the hit with condition_error and is disabled after 5 failures.
+                   abs/min/max/floor; nothing else. Numeric only: strings, '..', ':' and brackets are refused.
+                   Runs under an instruction budget; an erroring condition records the hit with condition_error
+                   and is disabled after 5 failures.
         mode: "break" leaves the thread STOPPED: inspect it with get_halted_state, resume with debug_continue. A
               watchdog resumes it after halt_timeout_ms (default 10000, max 300000) so the target never stays frozen.
         stop_after_hits: Remove the breakpoint after this many matching hits (0 = unlimited).

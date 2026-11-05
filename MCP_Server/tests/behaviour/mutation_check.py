@@ -75,6 +75,7 @@ MUTANTS = [
     ("recover_int_next_to_float_read_as_double", ANALYSIS, "if low ~= 0 and (low <= 0xFFFF or low >= 0xFFFF0000) then return false end", "if false then return false end", "caught"),
     ("rtti_bases_offsets_ignored", ANALYSIS, 'bases[#bases + 1] = { name = U26.demangle(nm), offset = mdisp, virtual = (pdisp ~= -1), contained = contained }', 'bases[#bases + 1] = { name = U26.demangle(nm), offset = 99, virtual = true, contained = contained }', "caught"),
     # --- UNIT-27 part C (breakpoint control)
+    ("bp_condition_strings_allowed", BREAKPOINTS, 'if expr:find("[\\"\'%[%]:]") or expr:find("..", 1, true) then', "if false then", "caught"),
     ("bp_condition_ignored", BREAKPOINTS, "    local pass, condErr = BPX.test(bp)\n    if not pass then", "    local pass, condErr = true, nil\n    if not pass then", "caught"),
     ("bp_stop_after_hits_not_enforced", BREAKPOINTS, "    if bp.stop_after and (bp.hit_count or 0) >= bp.stop_after then", "    if false then", "caught"),
     ("bp_break_mode_resumes_anyway", BREAKPOINTS, '        if ok and result == "halt" then return 1 end', "        if false then return 1 end", "caught"),
@@ -205,8 +206,10 @@ def main():
             for mod, text in sources.items():
                 body = text.replace(old, new, 1) if mod == mutated_module else text
                 (copy / "bridge" / (mod + ".lua")).write_bytes(body.encode("utf-8"))
+            # cwd is the throwaway copy: a mutant that breaks the "off" state-dir guard writes its state files
+            # relative to cwd (as off\ce_mcp_pointer_sets.json, a name Windows git refuses to check out).
             proc = subprocess.run([sys.executable, str(TESTS / suite), str(copy)], capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", cwd=TESTS, timeout=600)
+                                  encoding="utf-8", errors="replace", cwd=copy, timeout=600)
             shutil.rmtree(copy, ignore_errors=True)
             if proc.returncode == EXIT_SKIP:
                 print("SKIP      lupa not available")
