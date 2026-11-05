@@ -11,7 +11,6 @@ import re
 import sys
 from pathlib import Path
 
-import testkit
 from testkit import EXIT_SKIP, BRIDGE_DIR, BRIDGE_LUA, arg_path, has_flag, finish  # re-exported for the suites  # noqa: F401
 
 

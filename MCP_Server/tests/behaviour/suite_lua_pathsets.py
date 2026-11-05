@@ -13,7 +13,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from lua_harness import run_lua, bridge_modules, arg_path, has_flag, finish, compile_check, BRIDGE_DIR
+from lua_harness import run_lua, bridge_modules, arg_path, finish, compile_check, BRIDGE_DIR
 from fake_ce import STUBS, HELPERS
 
 

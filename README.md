@@ -410,7 +410,7 @@ CHANGELOG.md                            # Release notes
 CLAUDE.md / AGENTS.md                   # Agent guidance (Claude Code / Codex; kept identical)
 
 MCP_Server/
-├── mcp_cheatengine.py                  # Python MCP server (FastMCP)
+├── mcp_cheatengine.py                  # Python MCP server (mcp 1.x FastMCP or 2.x MCPServer)
 ├── ce_mcp_bridge.lua                   # Cheat Engine bridge loader (load this in CE)
 ├── bridge/                             # The bridge: 32 modules (core, codec, tool areas, operations/analysis units, dispatcher)
 ├── ce_tcp_relay.py                     # Optional TCP-to-named-pipe relay (WSL, containers, other hosts)

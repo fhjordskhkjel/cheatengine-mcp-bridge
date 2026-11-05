@@ -9,12 +9,13 @@ permissions:
 
 jobs:
   linux:
-    name: Linux (Python ${{ matrix.python }})
+    name: Linux (Python ${{ matrix.python }}, mcp ${{ matrix.mcp }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python: ["3.10", "3.13"]
+        mcp: ["<2", ">=2,<3"]     # the server supports both SDK majors (FastMCP / MCPServer)
     steps:
       - uses: actions/checkout@v5
 
@@ -34,7 +35,10 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: Install dependencies
-        run: python -m pip install -r MCP_Server/requirements-dev.txt
+        run: python -m pip install -r MCP_Server/requirements-dev.txt "mcp${{ matrix.mcp }}"
+
+      - name: Lint (ruff, rules in ruff.toml)
+        run: python -m ruff check .
 
       - name: Byte-compile Python
         run: python -m compileall -q MCP_Server
@@ -43,8 +47,12 @@ jobs:
         run: python -m pytest -v
 
   windows:
-    name: Windows (named pipe + stdio)
+    name: Windows (named pipe + stdio, mcp ${{ matrix.mcp }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mcp: ["<2", ">=2,<3"]     # the CRLF patch is applied to whichever SDK is installed
     steps:
       - uses: actions/checkout@v5
 
@@ -53,7 +61,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: python -m pip install -r MCP_Server/requirements.txt -r MCP_Server/requirements-dev.txt
+        run: python -m pip install -r MCP_Server/requirements.txt -r MCP_Server/requirements-dev.txt "mcp${{ matrix.mcp }}"
 
       - name: Offline test suite (includes real named-pipe tests)
         run: python -m pytest -v -rs

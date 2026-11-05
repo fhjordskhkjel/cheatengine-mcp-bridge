@@ -7,7 +7,7 @@ updates:
       interval: weekly
 
   # MCP_Server/requirements*.txt. The mcp<2 pin is deliberate (2.x removes
-  # mcp.server.fastmcp); Dependabot will still surface 1.x updates.
+  # mcp.server.fastmcp); the server now supports both majors, see requirements.txt.
   - package-ecosystem: pip
     directory: /MCP_Server
     schedule:

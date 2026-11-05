@@ -21,7 +21,6 @@ import sys
 import time
 from pathlib import Path
 
-import testkit
 from testkit import EXIT_SKIP, finish, has_flag
 
 REPO = Path(__file__).resolve().parents[3]

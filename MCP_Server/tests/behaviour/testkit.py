@@ -3,7 +3,6 @@
 Every suite prints lines that start with ``PASS`` or ``FAIL``; this module counts them (whatever prints them)
 and `finish()` turns the totals into the process exit code, so a suite can be run on its own or via run_all.py.
 """
-import atexit
 import re
 import sys
 from pathlib import Path
