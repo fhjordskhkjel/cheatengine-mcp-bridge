@@ -222,3 +222,8 @@ ce_mcp_pointer_sets.json
 ce_mcp_pointer_sets.json.tmp
 ce_mcp_patch_journal.jsonl
 ce_mcp_patch_journal.jsonl.tmp
+
+# State files the Lua bridge writes (pointer sets, patch journal, writability probe) - also under a mutated 'off' folder
+*ce_mcp_pointer_sets.json
+*ce_mcp_patch_journal.jsonl
+*ce_mcp_state.probe

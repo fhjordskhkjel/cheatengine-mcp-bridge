@@ -17,6 +17,14 @@ def _command_handlers():
     return dict(re.findall(r"^\s*([a-z0-9_]+)\s*=\s*([A-Za-z0-9_]+)\s*,", LUA[start:end], re.M))
 
 
+def test_no_tracked_path_contains_a_backslash():
+    """Linux git happily tracks 'off\\x.json'; Windows git refuses to check it out and the whole CI job dies."""
+    import subprocess
+    paths = subprocess.run(["git", "ls-files", "-z"], cwd=REPO, capture_output=True, check=True).stdout.decode("utf-8")
+    bad = [p for p in paths.split("\0") if "\\" in p]
+    assert not bad, f"tracked paths with a backslash (not checkout-able on Windows): {bad}"
+
+
 def test_every_python_command_has_a_lua_handler():
     sent = set(re.findall(r'send_command\(\s*"([a-z0-9_]+)"', PY))
     missing = sorted(sent - set(_command_handlers()))

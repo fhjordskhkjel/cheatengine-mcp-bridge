@@ -206,8 +206,10 @@ def main():
             for mod, text in sources.items():
                 body = text.replace(old, new, 1) if mod == mutated_module else text
                 (copy / "bridge" / (mod + ".lua")).write_bytes(body.encode("utf-8"))
+            # cwd is the throwaway copy: a mutant that breaks the "off" state-dir guard writes its state files
+            # relative to cwd (as off\ce_mcp_pointer_sets.json, a name Windows git refuses to check out).
             proc = subprocess.run([sys.executable, str(TESTS / suite), str(copy)], capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", cwd=TESTS, timeout=600)
+                                  encoding="utf-8", errors="replace", cwd=copy, timeout=600)
             shutil.rmtree(copy, ignore_errors=True)
             if proc.returncode == EXIT_SKIP:
                 print("SKIP      lupa not available")
