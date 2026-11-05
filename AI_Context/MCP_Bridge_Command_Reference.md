@@ -3223,7 +3223,7 @@ The MCP bridge Python server (`mcp_cheatengine.py`) reads the following environm
 | `CE_MCP_STATE_DIR` | string | see section 37 | Read by the **Lua bridge**, not the MCP server (Lua global or Cheat Engine's environment): folder for the saved pointer sets and patch journal; `off` disables saving. |
 | `CE_MCP_ALLOW_SHELL` | int (0 or 1) | 0 | Set to `1` to enable shell execution tools (`run_command`, `shell_execute`). **Disabled by default for security.** The bridge has its own CE-side opt-in as well (see `run_command`). |
 | `CE_MCP_PROFILE` | str | `full` | `readonly` (read + analysis tools only), `standard` (adds write tools), `full` (adds exec tools). Unknown values fail at startup. |
-| `CE_MCP_TOOLSETS` | str | `all` | Comma-separated tool groups to register (`process` is always on). |
+| `CE_MCP_TOOLSETS` | str | `all` | Comma-separated tool groups and/or presets to register (`process` is always on; `core` = the 63 everyday RE tools, ~40 k instead of ~114 k characters of schemas). |
 | `CE_MCP_AUDIT_LOG` | path | unset | Append one JSON line per command: `ts`, `method`, `params` (strings capped at 16 KB, lists at 256 items), `outcome` (`ok` / `failed` / `timeout` / `transport_error` / `blocked`), `success`, `error_code`, `error`, `duration_ms`. Best-effort: an unwritable file logs one warning to stderr and tools keep working. |
 
 **Setting environment variables:**
@@ -3418,7 +3418,7 @@ Health/diagnostics. No parameters. Returns `version`, `pipe`, `uptime_seconds`, 
 `address`, `fields[]` = `{name, type, offset?, size?}`. `offset` defaults to the end of the previous field (packed). Types: `i8 u8 i16 u16 i32 u32 i64 u64 f32 f64 ptr bool bytes cstring wstring` plus aliases (`byte word dword qword float double int short pointer string utf16`). `size` = bytes for `bytes`/`cstring`, characters for `wstring`. Limits: 512 fields, 64 KB span. One `readBytes` covers the whole span; if that fails each field is read on its own and only unreadable fields get an `error`. Returns `fields[{name,type,offset,value,hex?,error?}]`, `span`, `arch`. Pointers and `u64` values above 2^63 are hex strings.
 
 ### `batch`
-`requests[]` = `{method, params}` (max 100, no nesting), `stop_on_error`. Runs sequentially in one main-thread slot. Returns `requested`, `executed`, `failed`, `results[]` (one reply per request, same shapes as the individual calls; a failing request does not fail the batch).
+`requests[]` = `{method, params}` (max 100, no nesting), `stop_on_error`, `time_budget_ms` (default 20000, 100..600000; the MCP tool sends 80% of `CE_MCP_TIMEOUT`). Runs sequentially in one main-thread slot; the budget is checked before each request and never cuts one short. Returns `requested`, `executed`, `failed`, `elapsed_ms`, `results[]` (one reply per request, same shapes as the individual calls; a failing request does not fail the batch) and, when it stopped before the end, `stopped_early` (`time_budget` | `stop_on_error`) with `not_run` = the trailing requests that were never started (resend those).
 
 ### Async jobs
 | Command | Parameters | Returns |

@@ -182,6 +182,19 @@ eq("unknown method", r.results[5].error_code, "NOT_FOUND")
 eq("nested batch rejected", r.results[6].error_code, "INVALID_PARAMS")
 r = cmd_batch({ requests = { { method = "ok" }, { method = "bad" }, { method = "ok" } }, stop_on_error = true })
 eq("stop_on_error stops", r.executed, 2)
+eq("stop_on_error is reported with the number of requests never started", r.stopped_early == "stop_on_error" and r.not_run == 1, true)
+r = cmd_batch({ requests = { { method = "ok" }, { method = "ok" } } })
+eq("a batch that ran to the end reports elapsed_ms and no early stop", r.stopped_early == nil and r.not_run == nil and type(r.elapsed_ms) == "number", true)
+-- the wall-time budget is checked before each request, never inside one
+serverState.dispatch.slow = function() local t = os.clock(); while os.clock() - t < 0.15 do end; return { success = true } end
+r = cmd_batch({ requests = { { method = "slow" }, { method = "slow" }, { method = "ok" }, { method = "ok" } }, time_budget_ms = 200 })
+eq("time budget: the request that crosses it still completes, the rest are never started",
+   r.success == true and r.executed == 2 and r.stopped_early == "time_budget" and r.not_run == 2 and #r.results == 2, true)
+eq("time budget: elapsed_ms is measured", r.elapsed_ms >= 250, true)
+r = cmd_batch({ requests = { { method = "slow" }, { method = "ok" } }, time_budget_ms = 1 })
+eq("time budget is at least 100 ms and the first request always runs", r.executed == 1 and r.stopped_early == "time_budget", true)
+r = cmd_batch({ requests = { { method = "slow" }, { method = "slow" }, { method = "ok" } } })
+eq("default budget (20 s) lets a short batch finish", r.executed == 3 and r.stopped_early == nil, true)
 eq("empty batch rejected", cmd_batch({ requests = {} }).error_code, "INVALID_PARAMS")
 local many = {}
 for i = 1, 101 do many[i] = { method = "ok" } end

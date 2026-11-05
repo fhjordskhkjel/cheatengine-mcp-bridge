@@ -258,6 +258,14 @@ def test_batch_gate(mod, monkeypatch):
     ok = [{"method": "read_integer", "params": {"address": "0x1"}}, {"method": "get_process_info"}, {"method": "read_bytes", "params": {}}]
     assert json.loads(mod.batch_commands(ok))["success"] is True
     assert mod.params_seen["batch"]["stop_on_error"] is False
+    monkeypatch.setattr(mod, "CE_MCP_TIMEOUT_SECONDS", 10.0)
+    json.loads(mod.batch_commands(ok))
+    assert mod.params_seen["batch"]["time_budget_ms"] == 8000, "default budget: 80% of CE_MCP_TIMEOUT=10"
+    json.loads(mod.batch_commands(ok, time_budget_ms=2500))
+    assert mod.params_seen["batch"]["time_budget_ms"] == 2500
+    monkeypatch.setattr(mod, "CE_MCP_TIMEOUT_SECONDS", None)
+    json.loads(mod.batch_commands(ok))
+    assert mod.params_seen["batch"]["time_budget_ms"] == 20000, "timeout disabled: 20 s"
 
     mod.params_seen.pop("batch")
     out = json.loads(mod.batch_commands([{"method": "no_such_method"}]))
@@ -275,6 +283,11 @@ def test_batch_gate(mod, monkeypatch):
 
     monkeypatch.setattr(mod, "ENABLED_TOOLSETS", {"process", "memory"})            # CE_MCP_TOOLSETS=memory
     out = json.loads(mod.batch_commands([{"method": "read_integer"}, {"method": "disassemble"}]))
+    assert out["error_code"] == "PERMISSION_DENIED" and "disabled_by_toolsets" in out["error"]
+    monkeypatch.setattr(mod, "ENABLED_TOOLSETS", {"process"})                      # CE_MCP_TOOLSETS=core
+    monkeypatch.setattr(mod, "ENABLED_TOOLS", set(mod.TOOL_PRESETS["core"]["tools"]))
+    assert json.loads(mod.batch_commands([{"method": "read_integer"}, {"method": "disassemble"}]))["success"] is True
+    out = json.loads(mod.batch_commands([{"method": "get_instruction_info"}]))
     assert out["error_code"] == "PERMISSION_DENIED" and "disabled_by_toolsets" in out["error"]
 
 

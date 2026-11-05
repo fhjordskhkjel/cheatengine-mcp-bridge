@@ -39,7 +39,8 @@ MUTANTS = [
     ("job_cap_removed", JOBS, "if running >= MAX_RUNNING_JOBS then", "if false then", "caught"),
     ("next_scan_job_destroys_shared_session", JOBS, "        j._ms = nil\n        j.progress = { current = 1, total = 1 }\n        jobFinish(j, \"done\", { result = { fields = { count = count } } })\n    end\n    ms.nextScan",
      "        j.progress = { current = 1, total = 1 }\n        j._temp = true\n        jobFinish(j, \"done\", { result = { fields = { count = count } } })\n    end\n    ms.nextScan", "caught"),
-    ("batch_stop_on_error_ignored", JOBS, "if stopOnError then break end", "if false then break end", "caught"),
+    ("batch_stop_on_error_ignored", JOBS, 'if stopOnError then stoppedEarly = "stop_on_error"; break end', "if false then break end", "caught"),
+    ("batch_time_budget_ignored", JOBS, 'if i > 1 and os.clock() - t0 >= budget then stoppedEarly = "time_budget"; break end', "if false then break end", "caught"),
     # --- UNIT-26 (analysis)
     ("string_ref_carry_removed", ANALYSIS, "stages[#stages + 1] = { ranges = codeRanges, carry = 7, onStart", "stages[#stages + 1] = { ranges = codeRanges, carry = 0, onStart", "caught"),
     ("cave_run_not_continued_across_chunks", ANALYSIS, 'if run.nextAddr == dbase then\n                local s, e = data:find("^" .. pat)', 'if false then\n                local s, e = data:find("^" .. pat)', "caught"),
