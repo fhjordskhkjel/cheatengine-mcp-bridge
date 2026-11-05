@@ -6,7 +6,7 @@
 
 Create mods, trainers, security audits, game bots, accelerate RE, or do anything else with any program and game in a fraction of a time.
 
-[![Version](https://img.shields.io/badge/version-12.2.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
+[![Version](https://img.shields.io/badge/version-12.3.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
 
 > [!NOTE]
 > Thanks everyone for the stars, much appreciated! <3
@@ -118,7 +118,7 @@ dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
 
 Re-executing the script is safe: it stops the running bridge first, including its worker thread, breakpoints and DBVM watches.
 
-Look for: `[MCP v12.2.0] MCP Server Listening on: CE_MCP_Bridge_v99`
+Look for: `[MCP v12.3.0] MCP Server Listening on: CE_MCP_Bridge_v99`
 
 ### 2. Configure MCP Client
 Add to your MCP configuration (e.g., `mcp_config.json`):
@@ -191,7 +191,7 @@ Set `--host` on the relay and `CE_MCP_HOST` on the MCP server to addresses that 
 ### 3. Verify Connection
 Use the `ping` tool to verify connectivity:
 ```json
-{"success": true, "version": "12.2.0", "message": "CE MCP Bridge Active"}
+{"success": true, "version": "12.3.0", "message": "CE MCP Bridge Active"}
 ```
 
 ### 4. Start Asking Questions

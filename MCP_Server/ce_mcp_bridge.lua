@@ -1,5 +1,5 @@
 -- ============================================================================
--- CHEATENGINE MCP BRIDGE v12.2.0
+-- CHEATENGINE MCP BRIDGE v12.3.0
 -- ============================================================================
 -- Loader. The bridge itself lives in MCP_Server/bridge/NN_*.lua; this file
 -- finds that folder, stops a bridge that is already running, loads the modules

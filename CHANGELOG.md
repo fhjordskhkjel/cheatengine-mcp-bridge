@@ -2,7 +2,7 @@
 
 All notable changes to the Cheat Engine MCP Bridge. The wire protocol (`CE_MCP_Bridge_v99`) is unchanged; reload `ce_mcp_bridge.lua` and restart the MCP server to pick up a new version.
 
-## Unreleased
+## 12.3.0 — 2026-11-05
 
 ### Added
 
