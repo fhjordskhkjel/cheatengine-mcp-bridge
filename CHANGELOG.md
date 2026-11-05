@@ -2,6 +2,14 @@
 
 All notable changes to the Cheat Engine MCP Bridge. The wire protocol (`CE_MCP_Bridge_v99`) is unchanged; reload `ce_mcp_bridge.lua` and restart the MCP server to pick up a new version.
 
+## 12.3.0 — 2026-11-05
+
+### Added
+
+- **`CE_MCP_TOOLSETS=core`**: a preset of the 63 tools a reverse-engineering session uses nearly every turn (reads/writes with the patch journal, scans, disassembly, the analysis jobs, hardware breakpoints, auto-assembler, Lua, plus the `process` group). Its schemas are ~40 k characters against ~114 k for `all`. Presets combine with groups (`core,kernel`); `list_toolsets` lists them.
+- **`batch_commands` has a wall-time budget.** `time_budget_ms` (default: 80% of `CE_MCP_TIMEOUT`, 20 s when the timeout is disabled) is checked before each request, so a batch of slow requests returns its partial results with `stopped_early: "time_budget"` and `not_run` instead of outliving the client's timeout (which lost the whole reply and kept the pipe busy). Replies also carry `elapsed_ms`, and `stop_on_error` reports `stopped_early: "stop_on_error"`.
+- The blocking `scan_all` / `next_scan` / `aob_scan` / `find_references` / `find_call_references` tool descriptions now name their `start_job` form, which keeps Cheat Engine responsive.
+
 ## 12.2.0 — 2026-11-05
 
 Covers [#4](https://github.com/fhjordskhkjel/cheatengine-mcp-bridge/pull/4) (module split) and [#5](https://github.com/fhjordskhkjel/cheatengine-mcp-bridge/pull/5) (ported units).

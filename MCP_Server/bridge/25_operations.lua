@@ -281,6 +281,8 @@ end
 -- batch: several commands in one round trip (single main-thread slot)
 -- ---------------------------------------------------------------------------
 local BATCH_MAX = 100
+local BATCH_DEFAULT_BUDGET_MS = 20000     -- below the client's default CE_MCP_TIMEOUT (30 s): a batch stops early rather than time out
+local BATCH_MAX_BUDGET_MS = 600000
 
 function cmd_batch(params)
     local reqs = params.requests
@@ -292,8 +294,15 @@ function cmd_batch(params)
     end
 
     local stopOnError = params.stop_on_error == true
-    local results, failed = {}, 0
+    -- Wall-time budget, checked BEFORE each request (a request is never interrupted): the whole batch runs in one
+    -- main-thread slot, so 100 slow requests would otherwise outlive the client's timeout, the reply would be
+    -- lost and the pipe would stay busy until the last one finished.
+    local budget = tonumber(params.time_budget_ms) or BATCH_DEFAULT_BUDGET_MS
+    budget = math.max(100, math.min(budget, BATCH_MAX_BUDGET_MS)) / 1000
+    local t0 = os.clock()
+    local results, failed, stoppedEarly = {}, 0, nil
     for i, req in ipairs(reqs) do
+        if i > 1 and os.clock() - t0 >= budget then stoppedEarly = "time_budget"; break end
         local method = type(req) == "table" and req.method or nil
         local handler = method and serverState.dispatch[method]
         local result
@@ -313,10 +322,16 @@ function cmd_batch(params)
         results[i] = result
         if type(result) == "table" and result.success == false then
             failed = failed + 1
-            if stopOnError then break end
+            if stopOnError then stoppedEarly = "stop_on_error"; break end
         end
     end
-    return { success = true, requested = #reqs, executed = #results, failed = failed, results = results }
+    local out = { success = true, requested = #reqs, executed = #results, failed = failed, results = results,
+                  elapsed_ms = math.floor((os.clock() - t0) * 1000 + 0.5) }
+    if stoppedEarly then
+        out.stopped_early = stoppedEarly
+        out.not_run = #reqs - #results        -- requests[executed + 1 ..] were never started; resend those
+    end
+    return out
 end
 
 -- ---------------------------------------------------------------------------
@@ -759,6 +774,8 @@ B.utf16leToUtf8 = utf16leToUtf8
 B.normalizeStructFields = normalizeStructFields
 B.fillStructEntry = fillStructEntry
 B.BATCH_MAX = BATCH_MAX
+B.BATCH_DEFAULT_BUDGET_MS = BATCH_DEFAULT_BUDGET_MS
+B.BATCH_MAX_BUDGET_MS = BATCH_MAX_BUDGET_MS
 B.MAX_RUNNING_JOBS = MAX_RUNNING_JOBS
 B.MAX_TRACKED_FINISHED_JOBS = MAX_TRACKED_FINISHED_JOBS
 B.JOB_TICK_INTERVAL_MS = JOB_TICK_INTERVAL_MS

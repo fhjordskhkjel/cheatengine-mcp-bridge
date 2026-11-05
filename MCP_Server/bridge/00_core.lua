@@ -8,7 +8,7 @@
 local B = ...
 
 local PIPE_NAME = "CE_MCP_Bridge_v99"
-local VERSION = "12.2.0"
+local VERSION = "12.3.0"
 
 -- Global State
 local serverState = {

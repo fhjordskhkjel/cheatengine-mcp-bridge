@@ -71,6 +71,31 @@ def test_all_toolsets_by_default(fake):
         s.close()
 
 
+def test_core_preset(fake):
+    """CE_MCP_TOOLSETS=core registers the preset's tools plus the process toolset; presets and toolsets combine."""
+    import mcp_cheatengine as m
+    s = Server(fake.port, CE_MCP_TOOLSETS="core")
+    try:
+        names = {t["name"] for t in s.tools()}
+        expected = set(m.TOOL_PRESETS["core"]["tools"]) | {n for n, g in m.TOOL_TOOLSET.items() if g == "process"}
+        assert names == expected and len(names) < len(m.TOOL_TOOLSET) // 3
+        s.call(3, "list_toolsets")
+        info = json.loads(s.read_until({3})[1][3]["result"]["content"][0]["text"])
+        assert info["enabled"] == ["process"] and info["enabled_presets"] == ["core"]
+        assert info["presets"]["core"]["enabled"] is True and "disassemble" in info["presets"]["core"]["tools"]
+        status = info["toolsets"]["analysis"]["tool_status"]
+        assert status["disassemble"]["status"] == "enabled" and status["get_instruction_info"]["status"] == "disabled_by_toolsets"
+        assert "core" in info["how_to_enable"]
+    finally:
+        s.close()
+    s = Server(fake.port, CE_MCP_TOOLSETS="core,kernel")
+    try:
+        names = {t["name"] for t in s.tools()}
+        assert "disassemble" in names and "map_memory" in names and "get_instruction_info" not in names
+    finally:
+        s.close()
+
+
 def test_toolset_filter(fake):
     s = Server(fake.port, CE_MCP_TOOLSETS="memory")
     try:

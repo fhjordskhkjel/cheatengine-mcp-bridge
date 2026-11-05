@@ -774,23 +774,61 @@ TOOLSETS = {
 ALWAYS_ON_TOOLSET = "process"
 
 
-def _parse_toolsets(raw_value):
-    """Parse CE_MCP_TOOLSETS; returns the set of enabled toolset names."""
+# Presets name individual tools across toolsets. CE_MCP_TOOLSETS accepts them next to toolset names
+# ("core", "core,debug"): the result is every tool of the named toolsets plus every tool of the named presets
+# (the `process` toolset is always on). The profile still applies on top.
+TOOL_PRESETS = {
+    "core": {
+        "description": "The tools a reverse-engineering session uses nearly every turn: reads and writes with the "
+                       "patch journal, scans, disassembly and the analysis jobs (xrefs, strings, PE, RTTI, pointer "
+                       "paths), hardware breakpoints, the auto-assembler and Lua. Plus the process toolset.",
+        "tools": [
+            # memory
+            "read_memory", "read_integer", "read_string", "read_pointer", "read_pointer_chain", "read_struct",
+            "get_memory_protection", "write_memory", "write_integer", "write_string", "list_patches", "undo_patch",
+            # scan
+            "scan_all", "next_scan", "get_scan_results", "aob_scan", "search_string", "get_memory_regions",
+            # analysis
+            "disassemble", "analyze_function", "find_function_boundaries", "find_references", "find_xrefs",
+            "find_string_refs", "pe_info", "pe_imports", "pe_exports", "rtti_scan_module", "recover_struct",
+            "find_pointer_path", "start_job", "get_job", "get_job_result", "wait_for_job", "cancel_job",
+            # debug
+            "set_breakpoint", "set_data_breakpoint", "get_breakpoint_hits", "list_breakpoints", "remove_breakpoint",
+            "clear_all_breakpoints", "get_halted_state", "debug_continue",
+            # scripting
+            "auto_assemble", "evaluate_lua", "assemble_instruction",
+        ],
+    },
+}
+
+
+def _parse_tool_selection(raw_value):
+    """Parse CE_MCP_TOOLSETS (toolset and/or preset names).
+
+    Returns (enabled toolsets, tools enabled by presets, enabled presets)."""
     if raw_value is None or raw_value.strip() == "":
-        return set(TOOLSETS)
+        return set(TOOLSETS), set(), set()
     wanted = {part.strip().lower() for part in raw_value.split(",") if part.strip()}
     if "all" in wanted:
-        return set(TOOLSETS)
-    unknown = sorted(wanted - set(TOOLSETS))
+        return set(TOOLSETS), set(), set()
+    presets = wanted & set(TOOL_PRESETS)
+    toolsets = wanted - presets
+    unknown = sorted(toolsets - set(TOOLSETS))
     if unknown:
         raise ValueError(
             f"CE_MCP_TOOLSETS: unknown toolset(s) {', '.join(unknown)}. "
-            f"Valid: all, {', '.join(TOOLSETS)}."
+            f"Valid: all, {', '.join(TOOLSETS)}; presets: {', '.join(TOOL_PRESETS)}."
         )
-    return wanted | {ALWAYS_ON_TOOLSET}
+    tools = {name for p in presets for name in TOOL_PRESETS[p]["tools"]}
+    return toolsets | {ALWAYS_ON_TOOLSET}, tools, presets
 
 
-ENABLED_TOOLSETS = _parse_toolsets(os.environ.get("CE_MCP_TOOLSETS"))
+def _parse_toolsets(raw_value):
+    """Parse CE_MCP_TOOLSETS; returns the set of enabled toolset names (presets add tools, not toolsets)."""
+    return _parse_tool_selection(raw_value)[0]
+
+
+ENABLED_TOOLSETS, ENABLED_TOOLS, ENABLED_PRESETS = _parse_tool_selection(os.environ.get("CE_MCP_TOOLSETS"))
 TOOL_TOOLSET = {}  # tool name -> toolset, for every defined tool (enabled or not)
 
 # Every tool also declares what it can change. The class drives both the MCP
@@ -860,7 +898,7 @@ def tool(toolset, access):
     def decorator(fn):
         TOOL_TOOLSET[fn.__name__] = toolset
         TOOL_ACCESS[fn.__name__] = access
-        if toolset in ENABLED_TOOLSETS and access in ALLOWED_ACCESS:
+        if (toolset in ENABLED_TOOLSETS or fn.__name__ in ENABLED_TOOLS) and access in ALLOWED_ACCESS:
             # structured_output=False: every tool returns one JSON string. With the default the SDK also declares an
             # outputSchema ({"result": str}) and sends every result twice (text + structuredContent).
             mcp.tool(annotations=_ACCESS_ANNOTATIONS[access], structured_output=False)(_run_off_event_loop(fn))
@@ -869,7 +907,7 @@ def tool(toolset, access):
 
 
 def _registration_status(name):
-    if TOOL_TOOLSET[name] not in ENABLED_TOOLSETS:
+    if TOOL_TOOLSET[name] not in ENABLED_TOOLSETS and name not in ENABLED_TOOLS:
         return "disabled_by_toolsets"
     if TOOL_ACCESS[name] not in ALLOWED_ACCESS:
         return "disabled_by_profile"
@@ -878,9 +916,9 @@ def _registration_status(name):
 
 @tool("process", "read")
 def list_toolsets() -> str:
-    """List tool groups, the active profile, and which tools are registered.
+    """List tool groups and presets, the active profile, and which tools are registered.
 
-    Tools are disabled either by CE_MCP_TOOLSETS (their group is off) or by
+    Tools are disabled either by CE_MCP_TOOLSETS (their group is off and no enabled preset names them) or by
     CE_MCP_PROFILE (their access class is not allowed). Both are set in the MCP
     server's environment and need a restart to change.
     """
@@ -890,6 +928,12 @@ def list_toolsets() -> str:
     return format_result({
         "success": True,
         "enabled": sorted(ENABLED_TOOLSETS),
+        "enabled_presets": sorted(ENABLED_PRESETS),
+        "presets": {
+            name: {"enabled": name in ENABLED_PRESETS, "description": preset["description"],
+                   "tools": sorted(preset["tools"])}
+            for name, preset in TOOL_PRESETS.items()
+        },
         "profile": CE_MCP_PROFILE,
         "allowed_access": [a for a in ACCESS_CLASSES if a in ALLOWED_ACCESS],
         "access_classes": ACCESS_CLASSES,
@@ -906,8 +950,8 @@ def list_toolsets() -> str:
             for group in TOOLSETS
         },
         "how_to_enable": (
-            "Set CE_MCP_TOOLSETS (e.g. 'memory,scan,debug' or 'all') and/or CE_MCP_PROFILE "
-            "(readonly | standard | full) in the MCP server config and restart it."
+            "Set CE_MCP_TOOLSETS (toolsets and/or presets, e.g. 'core', 'core,kernel', 'memory,scan,debug' or "
+            "'all') and/or CE_MCP_PROFILE (readonly | standard | full) in the MCP server config and restart it."
         ),
     })
 
@@ -1046,6 +1090,9 @@ def scan_all(value: str = None, type: str = "dword", protection: str = "+W-C",
              scan_option: str = "exact", value2: str = None) -> str:
     """Unified Memory Scanner (first scan).
 
+    Blocks Cheat Engine (and this call, up to CE_MCP_TIMEOUT) until the scan is done. For a large process or an
+    'unknown' scan use start_job(kind="scan_all", params={...}) instead: it uses the same session and CE stays responsive.
+
     Args:
         value: Value to search for. Omit when scan_option is 'unknown'.
         type: Value type: byte, word, dword, qword, float, double, string.
@@ -1076,6 +1123,8 @@ def get_scan_results(offset: int = 0, limit: int = 100, max: int = None) -> str:
 def next_scan(value: str = None, scan_type: str = "exact", value2: str = None) -> str:
     """Next scan to filter results from the last 'scan_all'.
 
+    Blocks Cheat Engine until done; start_job(kind="next_scan", params={...}) is the non-blocking form.
+
     Args:
         value: Value to compare against. Not needed for increased/decreased/changed/unchanged.
         scan_type: exact, between, bigger, smaller, increased, decreased, increased_by, decreased_by, changed, unchanged.
@@ -1103,7 +1152,10 @@ def write_string(address: str, value: str, wide: bool = False) -> str:
 
 @tool("scan", "read")
 def aob_scan(pattern: str, protection: str = "+X", limit: int = 100) -> str:
-    """Scan for an Array of Bytes (AOB) pattern. Example: '48 89 5C 24'."""
+    """Scan for an Array of Bytes (AOB) pattern. Example: '48 89 5C 24'.
+
+    Blocks Cheat Engine until done; start_job(kind="aob_scan", params={...}) is the non-blocking form.
+    """
     return format_result(ce_client.send_command("aob_scan", {"pattern": pattern, "protection": protection, "limit": limit}))
 
 @tool("scan", "read")
@@ -1178,6 +1230,9 @@ def analyze_function(address: str) -> str:
 def find_references(address: str, offset: int = 0, limit: int = 50) -> str:
     """Find instructions that access (reference) this address.
 
+    Blocks Cheat Engine until done; start_job(kind="find_references", params={...}) is the non-blocking form,
+    and find_xrefs covers calls, jumps, rip-relative operands and data pointers in one job.
+
     Args:
         address: Target address to find references to.
         offset: Start index for pagination (default 0).
@@ -1190,6 +1245,8 @@ def find_references(address: str, offset: int = 0, limit: int = 50) -> str:
 @tool("analysis", "read")
 def find_call_references(function_address: str, offset: int = 0, limit: int = 100) -> str:
     """Find all locations that CALL this function.
+
+    Blocks Cheat Engine until done; start_job(kind="find_call_references", params={...}) is the non-blocking form.
 
     Args:
         function_address: Address of the function to find callers of.
@@ -2954,7 +3011,7 @@ def _batch_gate(requests):
 
 
 @tool("process", "write")
-def batch_commands(requests: list[dict], stop_on_error: bool = False) -> str:
+def batch_commands(requests: list[dict], stop_on_error: bool = False, time_budget_ms: int = 0) -> str:
     """Run several bridge commands in ONE round trip (and one slot on CE's main thread).
 
     Args:
@@ -2963,8 +3020,13 @@ def batch_commands(requests: list[dict], stop_on_error: bool = False) -> str:
                   Max 100; nesting batch_commands is not allowed. Every method must be a tool that is registered
                   under the active CE_MCP_TOOLSETS / CE_MCP_PROFILE, otherwise the whole batch is refused.
         stop_on_error: Stop at the first failing request (default: run all).
+        time_budget_ms: Wall-time budget for the whole batch, checked before each request (a request is never
+                        cut short). Default 0 = 80% of CE_MCP_TIMEOUT (20 s when the timeout is disabled), so a
+                        batch of slow requests returns its partial results instead of timing out.
 
-    Returns JSON with: success, requested, executed, failed, results[] (one result object per request, in order).
+    Returns JSON with: success, requested, executed, failed, elapsed_ms, results[] (one result object per
+    request, in order). When the batch stopped before the end: stopped_early ("time_budget" | "stop_on_error")
+    and not_run, the number of trailing requests that were never started (resend those).
     """
     problems = []
     for i, req in enumerate(requests):
@@ -2978,7 +3040,16 @@ def batch_commands(requests: list[dict], stop_on_error: bool = False) -> str:
     denied = _batch_gate(requests)
     if denied:
         return format_result({"success": False, "error": "; ".join(denied), "error_code": "PERMISSION_DENIED"})
-    return format_result(ce_client.send_command("batch", {"requests": requests, "stop_on_error": stop_on_error}))
+    budget = int(time_budget_ms) if time_budget_ms and time_budget_ms > 0 else _default_batch_budget_ms()
+    return format_result(ce_client.send_command("batch", {"requests": requests, "stop_on_error": stop_on_error,
+                                                          "time_budget_ms": budget}))
+
+
+def _default_batch_budget_ms():
+    """80% of the client's per-command timeout, so the bridge stops a batch before the client gives up on it."""
+    if CE_MCP_TIMEOUT_SECONDS is None:
+        return 20000
+    return max(100, int(CE_MCP_TIMEOUT_SECONDS * 800))
 
 
 @tool("analysis", "analysis")
@@ -3451,6 +3522,12 @@ def drop_patches(which: str = "inactive") -> str:
     return format_result(ce_client.send_command("drop_patches", {"which": which}))
 
 # >>> END UNIT-31 <<<
+
+
+for _name, _preset in TOOL_PRESETS.items():
+    _missing = sorted(set(_preset["tools"]) - set(TOOL_TOOLSET))
+    if _missing:
+        raise RuntimeError(f"tool preset {_name!r} names tools that do not exist: {', '.join(_missing)}")
 
 
 def _drop_schema_titles(node):

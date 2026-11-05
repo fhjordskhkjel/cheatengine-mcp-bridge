@@ -6,7 +6,7 @@
 
 Create mods, trainers, security audits, game bots, accelerate RE, or do anything else with any program and game in a fraction of a time.
 
-[![Version](https://img.shields.io/badge/version-12.2.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
+[![Version](https://img.shields.io/badge/version-12.3.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
 
 > [!NOTE]
 > Thanks everyone for the stars, much appreciated! <3
@@ -118,7 +118,7 @@ dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
 
 Re-executing the script is safe: it stops the running bridge first, including its worker thread, breakpoints and DBVM watches.
 
-Look for: `[MCP v12.2.0] MCP Server Listening on: CE_MCP_Bridge_v99`
+Look for: `[MCP v12.3.0] MCP Server Listening on: CE_MCP_Bridge_v99`
 
 ### 2. Configure MCP Client
 Add to your MCP configuration (e.g., `mcp_config.json`):
@@ -191,7 +191,7 @@ Set `--host` on the relay and `CE_MCP_HOST` on the MCP server to addresses that 
 ### 3. Verify Connection
 Use the `ping` tool to verify connectivity:
 ```json
-{"success": true, "version": "12.2.0", "message": "CE MCP Bridge Active"}
+{"success": true, "version": "12.3.0", "message": "CE MCP Bridge Active"}
 ```
 
 ### 4. Start Asking Questions
@@ -379,7 +379,7 @@ Cheat Engine usually runs elevated, so a shell command started by the bridge run
 | `CE_MCP_ALLOW_SHELL` | *unset* | Set to `1` to enable `run_command` / `shell_execute`. **Arbitrary code execution risk.** Needs the CE-side opt-in too, and `CE_MCP_PROFILE=full`. |
 | `CE_MCP_AUDIT_LOG` | *unset* | Path of a JSON-lines file that records every command sent to Cheat Engine (time, method, parameters, outcome, error code, duration). |
 | `CE_MCP_STATE_DIR` | *see text* | Read by the **Lua bridge** (set it in Cheat Engine's environment, or as a Lua global before loading the script): folder for the saved pointer sets and patch journal. Default: the folder of `ce_mcp_bridge.lua`, else `%LOCALAPPDATA%`, else the temp folder; `off` disables saving. |
-| `CE_MCP_TOOLSETS` | `all` | Comma-separated tool groups to register: `process` (always on), `memory`, `scan`, `analysis`, `debug`, `kernel`, `scripting`, `table`, `gui`, `system`. All 176 tool schemas cost a lot of context on every turn; e.g. `memory,scan,analysis,debug` keeps the reverse-engineering core (~100 tools). The `list_toolsets` tool shows what each group contains and what is disabled. |
+| `CE_MCP_TOOLSETS` | `all` | Comma-separated tool groups and/or presets to register. Groups: `process` (always on), `memory`, `scan`, `analysis`, `debug`, `kernel`, `scripting`, `table`, `gui`, `system`. Preset: `core`, the 63 tools a reverse-engineering session uses nearly every turn (reads/writes with the patch journal, scans, disassembly, the analysis jobs, hardware breakpoints, auto-assembler, Lua). All 214 tool schemas are ~114 k characters on every turn; `core` is ~40 k, and it combines with groups (`core,kernel`). The `list_toolsets` tool shows what each group and preset contains and what is disabled. |
 
 ---
 

@@ -112,6 +112,27 @@ def test_parse_toolsets_rejects_unknown():
         m._parse_toolsets("memory,bogus")
 
 
+@pytest.mark.parametrize("raw,toolsets,presets", [
+    ("core", {"process"}, {"core"}), ("CORE, kernel", {"process", "kernel"}, {"core"}),
+    ("core,all", set(m.TOOLSETS), set()), ("memory", {"process", "memory"}, set()),
+])
+def test_parse_tool_selection_presets(raw, toolsets, presets):
+    got_toolsets, tools, got_presets = m._parse_tool_selection(raw)
+    assert (got_toolsets, got_presets) == (toolsets, presets)
+    assert tools == (set(m.TOOL_PRESETS["core"]["tools"]) if presets else set())
+    assert m._parse_toolsets(raw) == toolsets
+
+
+def test_presets_name_existing_tools_once():
+    for name, preset in m.TOOL_PRESETS.items():
+        tools = preset["tools"]
+        assert len(tools) == len(set(tools)), f"{name}: duplicate entries"
+        assert set(tools) <= set(m.TOOL_TOOLSET), f"{name}: unknown tools {set(tools) - set(m.TOOL_TOOLSET)}"
+        assert not {t for t in tools if m.TOOL_TOOLSET[t] == m.ALWAYS_ON_TOOLSET}, "process tools are always on; do not list them"
+    core = m.TOOL_PRESETS["core"]["tools"]
+    assert 40 <= len(core) <= 60, "core is meant to stay a fraction of the full list"
+
+
 def test_every_tool_has_a_toolset():
     assert len(m.TOOL_TOOLSET) >= 176
     assert set(m.TOOL_TOOLSET.values()) == set(m.TOOLSETS)
