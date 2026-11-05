@@ -10,7 +10,7 @@ import pytest
 from conftest import SERVER_DIR
 from fake_bridge import FakeBridge
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 
 
 class Server:
@@ -67,6 +67,24 @@ def test_all_toolsets_by_default(fake):
     try:
         names = {t["name"] for t in s.tools()}
         assert len(names) == 214 and {"list_toolsets", "ping", "set_breakpoint"} <= names
+    finally:
+        s.close()
+
+
+def test_windows_stdio_patch_end_to_end(fake):
+    """The CRLF patch (always on under Windows, CE_MCP_FORCE_STDIO_PATCH=1 elsewhere) hands the SDK's own
+    stdio_server text streams opened with newline='\n'. Run the real server through it: a client that
+    terminates its lines with CRLF, as Windows hosts do, gets LF-terminated JSON-RPC back and tools work."""
+    s = Server(fake.port, CE_MCP_FORCE_STDIO_PATCH="1")
+    try:
+        assert "ping" in {t["name"] for t in s.tools()}
+        s.p.stdin.write((json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                                     "params": {"name": "ping", "arguments": {}}}) + "\r\n").encode())
+        s.p.stdin.flush()
+        raw = s.p.stdout.readline()
+        assert raw.endswith(b"\n") and not raw.endswith(b"\r\n"), raw[-6:]
+        reply = json.loads(raw)
+        assert reply["id"] == 7 and json.loads(reply["result"]["content"][0]["text"])["success"] is True
     finally:
         s.close()
 

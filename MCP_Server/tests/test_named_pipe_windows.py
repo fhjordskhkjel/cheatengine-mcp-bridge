@@ -19,7 +19,7 @@ if sys.platform != "win32":
 pywintypes = pytest.importorskip("pywintypes")
 win32file = pytest.importorskip("win32file")
 win32pipe = pytest.importorskip("win32pipe")
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 import mcp_cheatengine as m  # noqa: E402
 
 

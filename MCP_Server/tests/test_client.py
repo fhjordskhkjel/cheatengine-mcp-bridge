@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 import mcp_cheatengine as m  # noqa: E402
 
 from fake_bridge import FakeBridge  # noqa: E402

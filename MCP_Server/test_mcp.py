@@ -16,9 +16,8 @@ This test suite is designed to give 100% confidence in MCP bridge reliability.
 import win32file
 import struct
 import json
-import time
 import sys
-from typing import Optional, Dict, Any, Tuple, List, Callable
+from typing import Optional, Dict, List, Callable
 
 PIPE_NAME = r"\\.\pipe\CE_MCP_Bridge_v99"
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
@@ -160,7 +159,7 @@ class TestCase:
             self.response = raw_result.get("result", {})
             
             # Check for command-level failure
-            if self.response.get("success") == False:
+            if self.response.get("success") is False:
                 # Check if this is an expected failure (like "no process attached")
                 error_msg = self.response.get('error', 'Unknown error')
                 self.error = error_msg
@@ -185,12 +184,12 @@ class TestCase:
             print(f"Response: {resp_str}")
             
             if self.validation_errors:
-                print(f"✗ VALIDATION FAILED:")
+                print("✗ VALIDATION FAILED:")
                 for err in self.validation_errors:
                     print(f"  - {err}")
                 self.result = TestResult.FAILED
             else:
-                print(f"✓ PASSED")
+                print("✓ PASSED")
                 self.result = TestResult.PASSED
             
             return self.result
@@ -281,7 +280,7 @@ def bytes_match_pattern(bytes_field: str, data_field: str):
         if data_field not in resp:
             return False, f"Missing field: {data_field}"
         if not validate_bytes_match_data(resp[bytes_field], resp[data_field]):
-            return False, f"Bytes array doesn't match data string"
+            return False, "Bytes array doesn't match data string"
         return True, ""
     return validator
 
@@ -936,7 +935,7 @@ def main():
                       all_tests["get_physical_address"].response.get("success"))
     
     if dbvm_available:
-        print(f"\n[DBVM detected - running full DBVM watch tests with cleanup]")
+        print("\n[DBVM detected - running full DBVM watch tests with cleanup]")
         
         # Use a READ address (module base) for safe monitoring
         # Watch for reads is safer than writes for testing
@@ -970,7 +969,7 @@ def main():
         all_tests["stop_dbvm_watch"].run(client)
         
     else:
-        print(f"\n[DBVM not detected - skipping watch tests]")
+        print("\n[DBVM not detected - skipping watch tests]")
         
         all_tests["start_dbvm_watch"] = TestCase(
             "Start DBVM Watch", "start_dbvm_watch",
@@ -1724,7 +1723,8 @@ def main():
         cat_failed = sum(1 for t in tests if all_tests.get(t) and all_tests[t].result == TestResult.FAILED)
         cat_skipped = sum(1 for t in tests if all_tests.get(t) and all_tests[t].result == TestResult.SKIPPED)
         cat_total = len(tests)
-        print(f"\n{cat_name}: {cat_passed}/{cat_total - cat_skipped} passed" + (f" ({cat_skipped} skipped)" if cat_skipped else ""))
+        print(f"\n{cat_name}: {cat_passed}/{cat_total - cat_skipped} passed" + (f", {cat_failed} failed" if cat_failed else "")
+              + (f" ({cat_skipped} skipped)" if cat_skipped else ""))
         for test in tests:
             if test in all_tests:
                 t = all_tests[test]

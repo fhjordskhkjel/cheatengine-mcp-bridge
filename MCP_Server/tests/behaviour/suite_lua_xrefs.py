@@ -454,7 +454,8 @@ def real_xref_validation():
                     break
                 pos = last + 1
 
-        inside = lambda a: hmod <= a < hmod + soi
+        def inside(a):
+            return hmod <= a < hmod + soi
         rnd = random.Random(seed)
         picks = []
         for grp in ("branch", "rip"):

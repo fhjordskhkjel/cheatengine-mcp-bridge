@@ -14,7 +14,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import testkit
 from lua_harness import module_names, module_source
 from testkit import BRIDGE_DIR, EXIT_SKIP
 

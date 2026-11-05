@@ -2,6 +2,13 @@
 
 All notable changes to the Cheat Engine MCP Bridge. The wire protocol (`CE_MCP_Bridge_v99`) is unchanged; reload `ce_mcp_bridge.lua` and restart the MCP server to pick up a new version.
 
+## Unreleased
+
+### Changed
+
+- **The MCP server runs on `mcp` 2.x as well as 1.x** (`mcp>=1.28,<3`). It picks `MCPServer` (2.x) or `FastMCP` (1.x) at import. The Windows CRLF patch now hands the SDK's own `stdio_server` text streams opened with `newline='\n'` instead of re-implementing its reader/writer loop, so it no longer depends on SDK-internal message types. CI runs the offline suite, including the real-stdio and named-pipe tests, under both majors.
+- **Lint in CI:** `python -m ruff check .` (pyflakes plus the comparison/lambda/bare-except rules, `ruff.toml`). The findings it had were unused imports, placeholder-less f-strings, two dead variables, an `== False` and a lambda assignment; none changed behaviour, except that `test_mcp.py`'s category summary now also prints the failed count it was computing and dropping.
+
 ## 12.3.0 — 2026-11-05
 
 ### Added

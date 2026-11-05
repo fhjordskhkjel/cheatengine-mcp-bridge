@@ -8,7 +8,7 @@ Usage: python tests/test_lua_analysis.py [path/to/ce_mcp_bridge.lua] [--real]
           (exports/imports are cross-checked with GetProcAddress, sections with VirtualQuery).
 Set BRIDGE_TEST_DUMP=<file> to write the generated x64 Lua test program for debugging.
 """
-import json, struct, sys, os
+import json, struct, os
 
 from lua_harness import run_lua, bridge_modules, arg_path, has_flag, finish, compile_check, BRIDGE_DIR
 

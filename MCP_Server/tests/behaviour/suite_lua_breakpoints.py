@@ -4,7 +4,6 @@ data-breakpoint validation, and the guarantee that a hit callback can never leav
 A fake debugger simulates hardware breakpoint hits (FIRE), debug_continueFromBreakpoint, debug_isBroken and queue().
 Usage: python tests/test_lua_breakpoints.py [path/to/ce_mcp_bridge.lua]
 """
-import sys
 
 from fake_ce import STUBS as BASE_STUBS
 

@@ -1,0 +1,8 @@
+# Lint for the Python side (python -m ruff check .). Pyflakes plus the comparison/lambda/bare-except
+# checks only: the Lua-style one-liners in the test suites (E701/E702) and single-letter names
+# (E741) are deliberate and stay.
+target-version = "py310"
+line-length = 160
+
+[lint]
+select = ["F", "E9", "E71", "E72", "E73"]

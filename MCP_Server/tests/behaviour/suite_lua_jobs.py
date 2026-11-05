@@ -3,7 +3,6 @@
 Runs the real handlers against a fake CE API (memscan, foundlist, timer, memory) inside CE's Lua 5.3.
 Usage: python MCP_Server/tests/behaviour/suite_lua_jobs.py [path/to/MCP_Server]
 """
-import sys
 
 from lua_harness import run_lua, bridge_modules, arg_path, finish, compile_check, BRIDGE_DIR
 

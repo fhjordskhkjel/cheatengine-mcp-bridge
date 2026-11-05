@@ -246,7 +246,6 @@ def test_tool_list(mod):
           or tools["compare_pointer_paths"].parameters["properties"]["chains"].get("type") == "array", tools["compare_pointer_paths"].parameters["properties"]["chains"])
     check("find_pointer_path requires address", tools["find_pointer_path"].parameters.get("required") == ["address"], tools["find_pointer_path"].parameters.get("required"))
 
-    stop = True
 
 
 

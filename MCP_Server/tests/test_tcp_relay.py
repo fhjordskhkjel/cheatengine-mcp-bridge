@@ -1,7 +1,6 @@
 """ce_tcp_relay.py with pywin32 stubbed out and a fake CE pipe behind it."""
 import importlib.util
 import json
-import os
 import socketserver
 import struct
 import sys
@@ -12,7 +11,7 @@ import pytest
 
 from conftest import SERVER_DIR
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 import mcp_cheatengine as m  # noqa: E402
 
 

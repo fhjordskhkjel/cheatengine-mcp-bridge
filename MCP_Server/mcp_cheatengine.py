@@ -3,79 +3,49 @@ import os
 
 # ============================================================================
 # CRITICAL: WINDOWS LINE ENDING FIX FOR MCP (MONKEY-PATCH)
-# The MCP SDK's stdio_server uses TextIOWrapper without newline='\n', causing
-# Windows to output CRLF (\r\n) instead of LF (\n). This causes the error:
-# "invalid trailing data at the end of stream"
-# We MUST patch the MCP SDK BEFORE importing FastMCP.
+# The MCP SDK's stdio_server wraps stdin/stdout in text layers without
+# newline='\n' (mcp 1.x and 2.x alike), so on Windows every reply goes out as
+# CRLF and the client fails with "invalid trailing data at the end of stream".
+# We MUST patch the SDK BEFORE importing the server class, which captures the
+# reference at import time (see below). The patch only supplies the text
+# streams; the SDK's own reader/writer loop runs unchanged, so it survives SDK
+# upgrades that change the message types.
 # ============================================================================
-
-if sys.platform == "win32":
-    import msvcrt
+# CE_MCP_FORCE_STDIO_PATCH=1 applies the patch on any platform: that is how the
+# offline suite exercises it end to end on Linux (test_server_stdio.py).
+_PATCH_STDIO = sys.platform == "win32" or os.environ.get("CE_MCP_FORCE_STDIO_PATCH") == "1"
+if _PATCH_STDIO:
     from io import TextIOWrapper
     from contextlib import asynccontextmanager
-    
-    # Set binary mode on underlying file handles. Skip streams without a real
-    # descriptor (e.g. pytest's capture objects when this module is imported
-    # as a library); the stdio server only ever runs on real handles.
-    for _stream in (sys.stdin, sys.stdout):
-        try:
-            msvcrt.setmode(_stream.fileno(), os.O_BINARY)
-        except (AttributeError, OSError, ValueError):  # io.UnsupportedOperation is OSError+ValueError
-            pass
-    
-    # Monkey-patch the MCP SDK's stdio_server to use newline='\n'
+
+    if sys.platform == "win32":
+        import msvcrt
+        # Set binary mode on underlying file handles. Skip streams without a real
+        # descriptor (e.g. pytest's capture objects when this module is imported
+        # as a library); the stdio server only ever runs on real handles.
+        for _stream in (sys.stdin, sys.stdout):
+            try:
+                msvcrt.setmode(_stream.fileno(), os.O_BINARY)
+            except (AttributeError, OSError, ValueError):  # io.UnsupportedOperation is OSError+ValueError
+                pass
+
     import mcp.server.stdio as mcp_stdio
     import anyio
-    import anyio.lowlevel
-    from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-    import mcp.types as types
-    from mcp.shared.message import SessionMessage
-    
+
+    _sdk_stdio_server = mcp_stdio.stdio_server
+    # mcp 2.x: a TextIOWrapper whose close() never closes the sys stream's buffer. 1.x has no such class.
+    _StdioTextWrapper = getattr(mcp_stdio, "_UnownedTextWrapper", TextIOWrapper)
+
     @asynccontextmanager
-    async def _patched_stdio_server(
-        stdin: "anyio.AsyncFile[str] | None" = None,
-        stdout: "anyio.AsyncFile[str] | None" = None,
-    ):
-        """Patched stdio_server with proper Windows newline handling."""
+    async def _patched_stdio_server(stdin=None, stdout=None):
+        """The SDK's stdio_server, given text streams opened with newline='\n' so Windows emits LF."""
         if not stdin:
-            # Use newline='\n' to prevent CRLF translation on Windows
-            stdin = anyio.wrap_file(TextIOWrapper(sys.stdin.buffer, encoding="utf-8", newline='\n'))
+            stdin = anyio.wrap_file(_StdioTextWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace", newline="\n"))
         if not stdout:
-            # Use newline='\n' to prevent CRLF translation on Windows
-            stdout = anyio.wrap_file(TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline='\n'))
+            stdout = anyio.wrap_file(_StdioTextWrapper(sys.stdout.buffer, encoding="utf-8", newline="\n"))
+        async with _sdk_stdio_server(stdin, stdout) as streams:
+            yield streams
 
-        read_stream_writer, read_stream = anyio.create_memory_object_stream(0)
-        write_stream, write_stream_reader = anyio.create_memory_object_stream(0)
-
-        async def stdin_reader():
-            try:
-                async with read_stream_writer:
-                    async for line in stdin:
-                        try:
-                            message = types.JSONRPCMessage.model_validate_json(line)
-                        except Exception as exc:
-                            await read_stream_writer.send(exc)
-                            continue
-                        session_message = SessionMessage(message)
-                        await read_stream_writer.send(session_message)
-            except anyio.ClosedResourceError:
-                await anyio.lowlevel.checkpoint()
-
-        async def stdout_writer():
-            try:
-                async with write_stream_reader:
-                    async for session_message in write_stream_reader:
-                        json = session_message.message.model_dump_json(by_alias=True, exclude_none=True)
-                        await stdout.write(json + "\n")
-                        await stdout.flush()
-            except anyio.ClosedResourceError:
-                await anyio.lowlevel.checkpoint()
-
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(stdin_reader)
-            tg.start_soon(stdout_writer)
-            yield read_stream, write_stream
-    
     # Apply the monkey-patch
     mcp_stdio.stdio_server = _patched_stdio_server
 
@@ -106,15 +76,19 @@ import traceback
 try:
     import anyio
     import anyio.to_thread
-    from mcp.server.fastmcp import FastMCP
+    try:
+        from mcp.server.mcpserver import MCPServer as FastMCP   # mcp 2.x (FastMCP was renamed)
+        import mcp.server.mcpserver.server as _mcp_server_module
+    except ImportError:
+        from mcp.server.fastmcp import FastMCP                   # mcp 1.x
+        import mcp.server.fastmcp.server as _mcp_server_module
     from mcp.types import ToolAnnotations
-    
-    # CRITICAL: Also patch the reference inside the fastmcp module
-    # FastMCP already imported stdio_server before our patch, so we need to update its reference too
-    if sys.platform == "win32":
-        import mcp.server.fastmcp.server as fastmcp_server
-        fastmcp_server.stdio_server = _patched_stdio_server
-        
+
+    # CRITICAL: Also patch the reference inside the server module. It did
+    # `from mcp.server.stdio import stdio_server` before our patch, so patching
+    # mcp.server.stdio alone is a silent no-op for the running server.
+    if _PATCH_STDIO:
+        _mcp_server_module.stdio_server = _patched_stdio_server
 except ImportError as e:
     print(f"[MCP CE] Import Error: {e}", file=sys.stderr, flush=True)
     sys.exit(1)
