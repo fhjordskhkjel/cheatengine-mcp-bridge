@@ -38,7 +38,7 @@ def mod(monkeypatch):
         if method == "get_job_result":
             return {"success": True, "echo_offset": params.get("offset"), "echo_limit": params.get("limit")}
         if method == "bridge_status":
-            return {"success": True, "version": "12.1.0", "uptime_seconds": 5}
+            return {"success": True, "version": "12.2.0", "uptime_seconds": 5}
         return {"success": True, "echo": method}
 
     monkeypatch.setattr(m.ce_client, "send_command", fake_send)

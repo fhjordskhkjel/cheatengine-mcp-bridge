@@ -2,7 +2,9 @@
 
 All notable changes to the Cheat Engine MCP Bridge. The wire protocol (`CE_MCP_Bridge_v99`) is unchanged; reload `ce_mcp_bridge.lua` and restart the MCP server to pick up a new version.
 
-## Unreleased
+## 12.2.0 — 2026-11-05
+
+Covers [#4](https://github.com/fhjordskhkjel/cheatengine-mcp-bridge/pull/4) (module split) and [#5](https://github.com/fhjordskhkjel/cheatengine-mcp-bridge/pull/5) (ported units).
 
 ### Added
 
@@ -27,6 +29,7 @@ Ported from [miscusi-peek/cheatengine-mcp-bridge#65](https://github.com/miscusi-
 
 ### Fixed
 
+- **Breakpoint `condition` / `inspect` expressions can no longer allocate inside Cheat Engine.** The restricted environment hid every global, but a string value still reached the string library through the string metatable, so `("a"):rep(1 << 30)` in a condition allocated a gigabyte per hit in one C call that the instruction budget cannot interrupt — from the `standard` profile, which registers `set_breakpoint`. Expressions are numeric, so `BPX.compile` now refuses string literals, `..`, `:` and brackets with `INVALID_PARAMS`.
 - **Reloading the script now stops the running bridge.** `StartMCPBridge` called `StopMCPBridge` after the reload had already replaced it with the new instance's version, so the old worker thread kept serving the pipe with the old code and its hardware breakpoints and DBVM watches were never removed. The loader now calls the previous instance's `StopMCPBridge` before loading anything; this also works when upgrading from the single-file bridge.
 - **Kernel memory mappings are released on stop/reload.** `cleanupZombieState` referred to `mappedMemoryMDL` before it was declared, so it was always nil and `map_memory` mappings were never unmapped.
 

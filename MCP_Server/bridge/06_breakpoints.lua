@@ -41,7 +41,8 @@ end
 
 -- Breakpoint control lives in one table: this chunk is close to CE's 200-locals limit.
 --   condition  : sandboxed expression over the registers (RAX, ...), memory readers (u32(addr), ptr(addr), f32(addr) ...)
---                and hits()/seen(); runs under an instruction budget so it can never hang the target
+--                and hits()/seen(); numeric only (no strings, `..`, `:` or brackets, see BPX.compile) and run under
+--                an instruction budget, so it can neither hang the target nor exhaust CE's memory
 --   stop_after_hits : detach after N matching hits (max_hits is the size of the hit ring buffer, see 00_core)
 --   mode=break : leave the thread stopped (break-and-inspect); a watchdog resumes it after halt_timeout_ms
 local BPX = { HALT_DEFAULT_MS = 10000, HALT_MAX_MS = 300000, HALT_HARD_LIMIT_S = 600,
@@ -112,6 +113,12 @@ end
 function BPX.compile(expr, bp)
     if type(expr) ~= "string" or expr == "" then return nil, "empty expression" end
     if #expr > 500 then return nil, "expression is longer than 500 characters" end
+    -- A string value reaches the string library through the string metatable, which the empty environment does not
+    -- hide: ("a"):rep(1 << 30) allocates a gigabyte inside CE in a single C call, past the instruction budget.
+    -- Conditions are numeric, so refuse every way of making a string (literals, `..`) or calling a method on one.
+    if expr:find("[\"'%[%]:]") or expr:find("..", 1, true) then
+        return nil, "strings, '..', ':' and brackets are not allowed in a condition"
+    end
     local fn, err = load("return (" .. expr .. ")", "=expr", "t", BPX.makeEnv(bp))
     if not fn then return nil, tostring(err) end
     return fn

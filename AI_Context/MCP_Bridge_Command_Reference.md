@@ -1,10 +1,10 @@
-# MCP Bridge Command Reference (v12.1.0)
+# MCP Bridge Command Reference (v12.2.0)
 
 > **For AI Agents**: This document describes all available commands in the Cheat Engine MCP Bridge. Use these commands to perform memory analysis, reverse engineering, and dynamic tracing on target processes.
 >
 > **Architecture Support**: All commands automatically adapt to 32-bit or 64-bit targets. Pointer operations use `readPointer()` for automatic size handling.
 >
-> **Version**: This reference covers the v12.1 tool surface (214 tools). Every failure carries an `error_code` from the enum in `CLAUDE.md`; see `CHANGELOG.md` for what changed in 12.1.0.
+> **Version**: This reference covers the v12.1 tool surface (214 tools). Every failure carries an `error_code` from the enum in `CLAUDE.md`; see `CHANGELOG.md` for what changed in 12.2.0.
 
 ---
 
@@ -65,7 +65,7 @@
 
 **Example response:**
 ```json
-{"success": true, "version": "12.1.0", "timestamp": 1733540000, "message": "CE MCP Bridge alive"}
+{"success": true, "version": "12.2.0", "timestamp": 1733540000, "message": "CE MCP Bridge alive"}
 ```
 
 **Usage**: Call this first to verify connectivity before performing operations.
@@ -3488,7 +3488,7 @@ Heuristics, in order, per slot: pointer-sized pointer (or null) in every instanc
 
 | Parameter | Meaning |
 |-----------|---------|
-| `condition` | Expression that must be true for a hit to be recorded. Environment: registers (`RAX`..`R15`, `RIP`, `RSP`, `EFLAGS`; x86 `EAX`..; case-insensitive), `u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 ptr` (memory readers; `nil` when unreadable), `hits()` (matched so far), `seen()` (all hits), `abs min max floor`. Nothing else is visible (`os`, `io`, `load`, `_G` are `nil`). Runs under an instruction budget (200 000 VM instructions), so `while true do end` cannot hang the target. Max 500 characters. A condition that raises an error records the hit with `condition_error` and is disabled after 5 failures (`condition_disabled`). |
+| `condition` | Expression that must be true for a hit to be recorded. Environment: registers (`RAX`..`R15`, `RIP`, `RSP`, `EFLAGS`; x86 `EAX`..; case-insensitive), `u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 ptr` (memory readers; `nil` when unreadable), `hits()` (matched so far), `seen()` (all hits), `abs min max floor`. Nothing else is visible (`os`, `io`, `load`, `_G` are `nil`), and the expression must be numeric: string literals, `..`, `:` and brackets are refused with `INVALID_PARAMS` (a string value would reach `string.rep` through the string metatable). Runs under an instruction budget (200 000 VM instructions), so `while true do end` cannot hang the target. Max 500 characters. A condition that raises an error records the hit with `condition_error` and is disabled after 5 failures (`condition_disabled`). |
 | `stop_after_hits` | Detach after N matching hits (the debug register is freed; the hits stay readable; `state:"completed"`). The removal is deferred with CE's `queue()` when available, because detaching inside the breakpoint's own callback is risky. |
 | `mode` | `"log"` (default) or `"break"`. Break mode leaves the thread stopped by returning a non-zero number from CE's callback without continuing. |
 | `halt_timeout_ms` | Watchdog for break mode (default 10 000, max 300 000, hard limit 600 s in total including steps). When it expires the bridge resumes the thread itself (`auto_resumed` counter, `last_halt.reason:"timeout"`). |

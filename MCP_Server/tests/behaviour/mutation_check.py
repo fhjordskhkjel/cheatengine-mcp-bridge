@@ -75,6 +75,7 @@ MUTANTS = [
     ("recover_int_next_to_float_read_as_double", ANALYSIS, "if low ~= 0 and (low <= 0xFFFF or low >= 0xFFFF0000) then return false end", "if false then return false end", "caught"),
     ("rtti_bases_offsets_ignored", ANALYSIS, 'bases[#bases + 1] = { name = U26.demangle(nm), offset = mdisp, virtual = (pdisp ~= -1), contained = contained }', 'bases[#bases + 1] = { name = U26.demangle(nm), offset = 99, virtual = true, contained = contained }', "caught"),
     # --- UNIT-27 part C (breakpoint control)
+    ("bp_condition_strings_allowed", BREAKPOINTS, 'if expr:find("[\\"\'%[%]:]") or expr:find("..", 1, true) then', "if false then", "caught"),
     ("bp_condition_ignored", BREAKPOINTS, "    local pass, condErr = BPX.test(bp)\n    if not pass then", "    local pass, condErr = true, nil\n    if not pass then", "caught"),
     ("bp_stop_after_hits_not_enforced", BREAKPOINTS, "    if bp.stop_after and (bp.hit_count or 0) >= bp.stop_after then", "    if false then", "caught"),
     ("bp_break_mode_resumes_anyway", BREAKPOINTS, '        if ok and result == "halt" then return 1 end', "        if false then return 1 end", "caught"),
